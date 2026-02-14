@@ -419,7 +419,7 @@ public:
     uint get_min_next_seq_rem();
     int range_worker(int& sockfd, Interval* it);
     int range_recv_block(int sockfd, Interval* it);
-    int process_range_rv(int id, int port, http_header* header, char* response, int rv, int& recv_offset);
+    int process_range_rv(struct range_conn* group_conns, http_header* header, char* response, int rv, int& recv_offset);
     // int send_group_range_request(struct range_conn* cur_range_conn, const int group_start_i, char* ranges_str);
     int send_group_range_request(struct range_conn* group_conns, interval_map gaps);
     int send_group_range_request_worker(struct range_conn** range_conns, int group_i);

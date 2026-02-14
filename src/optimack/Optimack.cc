@@ -43,7 +43,7 @@ const int print_per_sec_on = true;
 // #define COLLETIVE_MODE 1
 
 #ifndef CONN_NUM
-#define CONN_NUM 3
+#define CONN_NUM 1
 #endif
 
 #ifndef ACKPACING

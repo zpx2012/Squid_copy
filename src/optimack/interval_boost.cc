@@ -120,7 +120,7 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
     std::vector<uint> candidates;
     
     // Reserve memory to prevent reallocations during the loop
-    candidates.reserve(num*2);
+    candidates.reserve(num);
 
     // --- Phase 1: Read (Shared Lock) ---
     // Identify potential candidates without blocking other readers or writers.
@@ -132,14 +132,14 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
             if(it->first.upper() - 1 >= min_seq)
                 continue; //
             
-            if((skip++) % timeout != 0)
-                continue;
+            // if((skip++) % timeout != 0)
+            //     continue;
 
             // Check eligibility: either new (0.01) or timed out
             if((it->second == 0.01) || (time_now - it->second >= timeout)){
                 candidates.push_back(it->first.lower());
                 // Collect slightly more than needed to handle potential race conditions
-                if(++cnt >= num*2){
+                if(++cnt >= num){
                     // std::cout << num << std::endl;
                     break;
                 }
@@ -156,13 +156,13 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
         // OPTIMIZATION: Use try_to_lock. 
         // If another thread is currently writing, we yield immediately instead of 
         // queuing up and causing a convoy effect.
-        std::unique_lock lock(smtx, std::try_to_lock);
+        std::unique_lock lock(smtx); //, std::try_to_lock
         
-        if (!lock.owns_lock()) {
-            // Contention detected: Another thread is likely handling gaps.
-            // Return empty result to yield.
-            return result;
-        }
+        // if (!lock.owns_lock()) {
+        //     // Contention detected: Another thread is likely handling gaps.
+        //     // Return empty result to yield.
+        //     return result;
+        // }
 
         int cnt = 0;
         for(const auto& start_seq : candidates){
@@ -174,7 +174,7 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
                 continue;
             
             // Re-check strict sequence limit
-            if(it->first.upper() - 1 >= min_seq) 
+            if(it->first.lower() == 1 || it->first.upper() - 1 >= min_seq) 
                 continue;
 
             double code = 0;
@@ -188,7 +188,8 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
 
             // Add to result set
             result += std::make_pair(it->first, code);
-            // std::cout << "add " << it->first << " - " << order_types[int(code)] << ", ";
+            // if(timeout == 100)
+            //     std::cout << "add " << it->first << " - " << order_types[int(code)] << ", ";
 
             // Update timestamp in the main map
             // Note: Using the exact same 'time_now' for all items in this batch
@@ -198,7 +199,8 @@ interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int time
             if(++cnt == num)
                 break;
         }
-        // std::cout << num << std::endl;
+        // if(timeout == 100)
+        //     std::cout << "min_seq: " << min_seq << ", " << Intervals << std::endl;
     }
     
     return result;
