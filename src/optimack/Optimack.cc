@@ -43,7 +43,7 @@ const int print_per_sec_on = true;
 // #define COLLETIVE_MODE 1
 
 #ifndef CONN_NUM
-#define CONN_NUM 1
+#define CONN_NUM 3
 #endif
 
 #ifndef ACKPACING
@@ -3318,18 +3318,18 @@ Optimack::exec_iptables(char action, char* rule)
 //This one in use
 int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int len)
 {
-    unsigned char* payload_recv_buffer = (unsigned char*)malloc(len);
+    unsigned char* payload_recv_buffer = (unsigned char*)malloc(len+1);
     if(!payload_recv_buffer){
         log_error("insert_to_recv_buffer: can't malloc for %d bytes", len);
         return -1;
     }
-    memset(payload_recv_buffer, 0, len);
+    memset(payload_recv_buffer, 0, len+1);
     memcpy(payload_recv_buffer, data, len);
     std::lock_guard<std::mutex> lk(stdmutex_rb);
     // pthread_mutex_lock(&mutex_recv_buffer);
     auto ret = recv_buffer.insert( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
     if (ret.second == false) {
-        // print_func("recv_buffer: %u already existed.\n", seq);
+        if(debug_rb) print_func("recv_buffer: %u already existed. [%u, %u]\n", seq, ret.first->first, ret.first->first+ret.first->second.len);
         // log_error("recv_buffer: %u already existed.\n", seq);
         if(ret.first->second.len < len){
             // print_func("recv_buffer: old len %d < new len %d. Erase old one, replace with new onw\n", ret.first->second.len, len);
@@ -3338,16 +3338,17 @@ int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int 
             ret.first->second.data = NULL;
             recv_buffer.erase(ret.first);
             recv_buffer.insert ( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
-            log_debug("recv_buffer: insert [%u, %u] len %d", seq, seq+len-1, len);
+            if(debug_rb) print_func("recv_buffer: reinsert [%u, %u] len %d", seq, ret.first->first, ret.first->first+ret.first->second.len);
             ret.second = true;
         }
         else{
+            if(debug_rb) print_func("recv_buffer: free payload_recv_buffer %p", payload_recv_buffer);
             free(payload_recv_buffer);
             payload_recv_buffer = NULL;
         }
     }
     else if(debug_rb)
-        print_func("recv_buffer: insert [%u, %u] len %d", seq, seq+len-1, len);
+        print_func("recv_buffer: insert [%u, %u] len %d, data %p", ret.first->first, ret.first->first+ret.first->second.len, ret.first->second.len, ret.first->second.data);
     // pthread_mutex_unlock(&mutex_recv_buffer);
     return ret.second;
 }
@@ -3516,8 +3517,9 @@ int Optimack::send_data_to_squid_thread(){
 
                 auto cur = next(prev);
                 for(int count = 0; prev != recv_buffer.end() && cur != recv_buffer.end() && count < 100; prev = cur, cur++, count++){ //prev = cur,
-                    if(debug_rb) print_func("prev [%u, %u], cur [%u, %u]", prev->first, prev->first+prev->second.len, cur->first, cur->first+cur->second.len); //if(debug_rb) 
+                    if(debug_rb) print_func("prev [%u, %u], cur [%u, %u], count %d", prev->first, prev->first+prev->second.len, cur->first, cur->first+cur->second.len, count); //if(debug_rb) 
                     if(prev->first+prev->second.len >= cur->first){
+                        if(debug_rb) print_func("before: memcpy(%p+%d, %p, %d)", buf, buf_len, cur->second.data, cur->second.len); //if(debug_rb) 
                         if(buf_len + cur->second.len >= MAX_BUF_LEN){
                             // fp_to_client_write(reinterpret_cast<const char*>(prev->second.data), prev->second.len);
                             // send_data_to_squid(prev->first, prev->second.data, prev->second.len);
@@ -3528,9 +3530,13 @@ int Optimack::send_data_to_squid_thread(){
                             cur_ack_rel = last_send;
                         }
 
+                        if(debug_rb) print_func("memcpy(%p+%d, %p, %d)", buf, buf_len, cur->second.data, cur->second.len); //if(debug_rb) 
                         memcpy(buf+buf_len, cur->second.data, cur->second.len);
                         buf_len += cur->second.len;
+                        memset(prev->second.data, 0, prev->second.len);
                         free(prev->second.data);
+                        prev->second.data = NULL;
+                        prev->second.len = 0;
                         recv_buffer.erase(prev);
                     }
                     else{
@@ -3549,7 +3555,11 @@ int Optimack::send_data_to_squid_thread(){
             }
             else if(prev->first > last_send)
                 break;
+            memset(prev->second.data, 0, prev->second.len);
             free(prev->second.data);
+            prev->second.data = NULL;
+            prev->second.len = 0;
+            // prev->second = NULL;
             recv_buffer.erase(prev++);
         }
     }

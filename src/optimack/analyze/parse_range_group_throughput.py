@@ -146,7 +146,8 @@ def get_total_recvbytes(dirc, in_file, goodbytes, ports):
                 received_bytes, lost_bytes = calculate_loss_rate_from_file(df_tshark[df_tshark.dstport == port])
                 received_bytes_sum += received_bytes
                 lost_bytes_sum += lost_bytes
-            return received_bytes_sum, lost_bytes_sum/(lost_bytes_sum+received_bytes_sum)
+            print(df_tshark[df_tshark.tcp_seq_rel <= goodbytes]['data_len'].sum(),received_bytes_sum)
+            return df_tshark[df_tshark.tcp_seq_rel <= goodbytes]['data_len'].sum(), lost_bytes_sum/(lost_bytes_sum+received_bytes_sum)
 
 
 in_dir = os.path.expanduser(sys.argv[1])
@@ -174,7 +175,7 @@ for field in tag_fields:
     elif 'wholeset' in field or 'pareto' in field:
         fix_kw = 'wholeset'
 print(optim_num, fix_kw, fix_num)
-optim_num, fix_num = 1,3
+# optim_num, fix_num = 1,3
 
 cols = ['optim_num', 'group_num', 'thread_num', 'range','range_sum','optim','curl','goodbytes','recvedbytes', 'effi', 'lossrate',  'filename']
 df_output = pd.DataFrame(columns = cols)
@@ -250,6 +251,7 @@ with open(out_file, 'w') as outf:
                         df_range_sum['filename'] = in_file
                         df_output = pd.concat([df_output, df_range_sum[cols]])
 
+                        print(total_goodbytes, total_recvbytes, total_goodbytes*100.0/total_recvbytes)
                         print(optim_thrpt, range_thrpt, optim_thrpt+range_thrpt, duration)
                         print()
                         count += 1
@@ -262,48 +264,45 @@ print(df_output)
 df_output = df_output[ df_output.range > 0 ]
 #df_output = df_output[ df_output.thread_num % 2 == 0]
 df_output.to_csv(out_file, encoding='utf-8',index=False)
-df_output_5 = df_output[df_output['lossrate'] <= 0.051]
-df_output_5_above = df_output[df_output['lossrate'] > 0.051]
-df_output_10 = df_output_5_above[df_output_5_above['lossrate'] <= 0.10]
-df_output_10_above = df_output_5_above[df_output_5_above['lossrate'] > 0.10]
+
+#df_output_5 = df_output[df_output['lossrate'] <= 0.051]
+#df_output_5_above = df_output[df_output['lossrate'] > 0.051]
+#df_output_10 = df_output_5_above[df_output_5_above['lossrate'] <= 0.10]
+#df_output_10_above = df_output_5_above[df_output_5_above['lossrate'] > 0.10]
 
 
 #if  fix_kw == '' or fix_kw != 'wholeset':
-fix_kw = 'thread'
-test_kw = 'group'
-for df in [df_output_5, df_output_10, df_output_10_above]:
-    for optinum in [1, 2]:
-        fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(9.5,5.5))
-    #for cl in ['range_sum''curl']:
-        df = df[df.optim_num == optinum]
-        for i in range(4):
-            df = df[df[fix_kw+'_num'] == i+3]
-            axes1 = df.boxplot(ax=axes[i], column='curl', by='%s_num' % test_kw, showmeans=True)
-            axes1.set_ylim(0, 11)
-            axes1.set_xlabel('')
-            axes1.set_ylabel('Goodput(Mpbs)')
-            axes1.set_title(f"{fix_kw} = {i+3}")
+# fix_kw = 'thread'
+# test_kw = 'group'
+    # for optinum in [1, 2]:
+# fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(9.5,5.5))
 
-    #axes2 = df_output.boxplot(ax=axes[1], column='range_sum', by='%s_num' % test_kw, showmeans=True)
-    #axes2.set_ylim(0, 1100)
-    #axes2.set_xlabel('')
-    #axes2.set_ylabel('Goodput(Kpbs)')
-    #axes2.set_title("Overall Recovery Bandwidth of All Groups")
+# axes1 = df.boxplot(ax=axes[0], column='curl', by='%s_num' % test_kw, showmeans=True)
+# axes1.set_ylim(0, 11)
+# axes1.set_xlabel('')
+# axes1.set_ylabel('Goodput(Mpbs)')
+# axes1.set_title(f"{fix_kw} = {i+3}")
 
-    # axes3 = df_output.boxplot(ax=axes[2], column='effi', by='thread_num', showmeans=True)
-    # axes3.set_ylim(0, 1000)
-    # axes3.set_xlabel('')
-    # axes3.set_ylabel('Efficiency(%)')
-    # axes3.set_title("Efficiency")
-    # axes2.text(0.98, 0.98, date_string, ha='right', va='bottom', transform=axes2.transAxes)
+# axes2 = df_output.boxplot(ax=axes[1], column='range_sum', by='%s_num' % test_kw, showmeans=True)
+# axes2.set_ylim(0, 1100)
+# axes2.set_xlabel('')
+# axes2.set_ylabel('Goodput(Kpbs)')
+# axes2.set_title("Overall Recovery Bandwidth of All Groups")
 
-        xlabels = {'group':'Number of Threads Inside Each Group', 'thread': 'Number of Group'}
+# axes3 = df_output.boxplot(ax=axes[2], column='effi', by='thread_num', showmeans=True)
+# axes3.set_ylim(0, 1000)
+# axes3.set_xlabel('')
+# axes3.set_ylabel('Efficiency(%)')
+# axes3.set_title("Efficiency")
+# axes2.text(0.98, 0.98, date_string, ha='right', va='bottom', transform=axes2.transAxes)
 
-        fig.add_subplot(111, frameon=False)
-        plt.figtext(0.98, 0.08, date_string, ha='right', va='bottom', transform=fig.transFigure)
-        plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
-        plt.grid(False)
-        plt.xlabel(xlabels[fix_kw]) #Groups, 
-        fig.suptitle("Optim = %d, %s = %f, China-Shenzhen" % (optim_num, 'Loss rate', df.lossrate.mean())) # lossrate, rtt)
-        plt.savefig(out_file.replace('.csv', 'curl_range_sum_%doptim_%d%s.png' % (optim_num, 'lossrate', df.lossrate.mean()*100)), bbox_inches="tight")
+# xlabels = {'group':'Number of Threads Inside Each Group', 'thread': 'Number of Group'}
+
+# fig.add_subplot(111, frameon=False)
+# plt.figtext(0.98, 0.08, date_string, ha='right', va='bottom', transform=fig.transFigure)
+# plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+# plt.grid(False)
+# plt.xlabel(xlabels[fix_kw]) #Groups, 
+# fig.suptitle(f"Optim = {optim_num}, {fix_kw.capitalized()} = {fix_num}, Loss rate = {lossrate}, RTT = 250ms") # lossrate, rtt)
+# plt.savefig(out_file.replace('.csv', 'curl_range_sum_%doptim_%d%s.png' % (optim_num, fix_kw, fix_num)), bbox_inches="tight")
 

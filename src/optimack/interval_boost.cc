@@ -9,6 +9,9 @@
 
 bool debug = false;
 
+const char* order_types[] = {"out of order", "nerwest in order", "in order fill", "new request", "timeout request"};
+
+
 unsigned int IntervalList::size()
 {
     std::shared_lock lock(smtx); 
@@ -43,42 +46,6 @@ unsigned int IntervalList::total_bytes()
     return Intervals.size();
 }
 
-// bool IntervalList::checkAndinsertNewInterval(unsigned int start, unsigned int end, int& order_flag)
-// {
-//     if(contains(start,end)){
-//         return false;
-//     }
-//     char log[10000]={0};
-//     std::string before = Intervals2str();
-//     insertNewInterval(start, end);
-//     unsigned int last_first_end = getFirstEnd();
-//     if(debug)
-//         printf("[interval]: before-%s insert[%u,%u], after-%s,", before.substr(0,4900).c_str(), start, end, Intervals2str().c_str());
-
-//     // snprintf(log, 10000, "[interval]: before-%s insert[%u,%u], after-%s", before.substr(0,4900).c_str(), start, end, Intervals2str().c_str());
-//     if(last_first_end < end){
-//         order_flag = OUT_OF_ORDER;
-//         if(debug){
-//             printf(" out-of-order\n");
-//             log_debug("%s out-of-order", log);
-//         }
-//     }
-//     else if (last_first_end == end){
-//         order_flag = IN_ORDER_NEWEST;
-//         if(debug){
-//             printf(" in order newest\n");
-//             log_debug("%s in order newest", log);
-//         }
-//     }
-//     else{
-//         order_flag = IN_ORDER_FILL;
-//         if(debug){
-//             printf(" in order fill\n");
-//             log_debug("%s in order fill", log);
-//         }
-//     }
-//     return true;
-// }
 
 unsigned int IntervalList::getFirstStart()
 {
@@ -107,30 +74,12 @@ unsigned int IntervalList::getLastEnd()
         return 0;
 }
 
-// unsigned int IntervalList::getElem(unsigned int index, bool is_start)
-// {
-//     if(index < 0)
-//         return 0;
-
-//     unsigned ret = 0;
-//     std::shared_lock lock(smtx);
-//     if(boost::icl::interval_count(Intervals) > index){
-//         auto strided = Intervals | boost::adaptors::strided(index);
-//         auto elem = next(strided.begin());
-//         if(is_start)
-//             ret = elem->lower();
-//         else
-//             ret = elem->upper();
-//     }
-//     return ret;
-// }
 
 bool IntervalList::contains(unsigned int start, unsigned int end)
 {
     std::shared_lock lock(smtx);
     return boost::icl::contains(Intervals, interval_type::right_open(start, end));
 }
-
 
 
 // Function to insert new interval and
@@ -165,31 +114,96 @@ double now_ns(){
 }
 
 interval_map IntervalList::getGapsAndUpdateTimer(uint min_seq, int num, int timeout){
-    int cnt = 0;
-    double time_now = now_ns();
+
     interval_map result;
-    std::unique_lock lock(smtx);
-    // read_lock();
-    for(auto it = Intervals.begin(); it != Intervals.end(); it++){
-        if(it->first.upper()-1 >= min_seq)
-            continue;
-        if(it->second == 0.01)
-            result += std::make_pair(it->first, double(REQUEST_NEW));
-        else if(time_now - it->second >= timeout)
-            result += std::make_pair(it->first, double(REQUEST_TIMEOUT));
-        else
-            continue;
-        // read_unlock();
-        // write_lock();
-        it->second = time_now;
-        // write_unlock();
-        // read_lock();
-        if(++cnt == num)
-            break;
+    double time_now = now_ns();
+    std::vector<uint> candidates;
+    
+    // Reserve memory to prevent reallocations during the loop
+    candidates.reserve(num*2);
+
+    // --- Phase 1: Read (Shared Lock) ---
+    // Identify potential candidates without blocking other readers or writers.
+    {
+        std::shared_lock lock(smtx);
+        int cnt = 0, skip = 0;
+        for(auto it = Intervals.begin(); it != Intervals.end(); ++it){
+            // Skip gaps that are newer than the min_seq (not yet eligible for retrans)
+            if(it->first.upper() - 1 >= min_seq)
+                continue; //
+            
+            if((skip++) % timeout != 0)
+                continue;
+
+            // Check eligibility: either new (0.01) or timed out
+            if((it->second == 0.01) || (time_now - it->second >= timeout)){
+                candidates.push_back(it->first.lower());
+                // Collect slightly more than needed to handle potential race conditions
+                if(++cnt >= num*2){
+                    // std::cout << num << std::endl;
+                    break;
+                }
+            }
+        }
     }
-    // read_unlock();
+
+    // If no work is found, return immediately.
+    if(candidates.empty())
+        return result;
+
+    // --- Phase 2: Write (Unique Lock) ---
+    {
+        // OPTIMIZATION: Use try_to_lock. 
+        // If another thread is currently writing, we yield immediately instead of 
+        // queuing up and causing a convoy effect.
+        std::unique_lock lock(smtx, std::try_to_lock);
+        
+        if (!lock.owns_lock()) {
+            // Contention detected: Another thread is likely handling gaps.
+            // Return empty result to yield.
+            return result;
+        }
+
+        int cnt = 0;
+        for(const auto& start_seq : candidates){
+            // Re-find the interval. It might have changed since we released the read lock.
+            auto it = Intervals.find(start_seq);
+
+            // Validation checks under write lock:
+            if(it == Intervals.end()) 
+                continue;
+            
+            // Re-check strict sequence limit
+            if(it->first.upper() - 1 >= min_seq) 
+                continue;
+
+            double code = 0;
+            // Re-check timing conditions
+            if(it->second == 0.01)
+                code = REQUEST_NEW;
+            else if(time_now - it->second >= timeout)
+                code = REQUEST_TIMEOUT;
+            else 
+                continue; // It was updated by another thread just before we got the lock
+
+            // Add to result set
+            result += std::make_pair(it->first, code);
+            // std::cout << "add " << it->first << " - " << order_types[int(code)] << ", ";
+
+            // Update timestamp in the main map
+            // Note: Using the exact same 'time_now' for all items in this batch
+            // helps boost::icl merge adjacent intervals if they become contiguous.
+            Intervals.set(std::make_pair(it->first, time_now)); //
+
+            if(++cnt == num)
+                break;
+        }
+        // std::cout << num << std::endl;
+    }
+    
     return result;
 }
+
 
 
 void IntervalList::substract(IntervalList* other)
@@ -206,9 +220,6 @@ void IntervalList::printIntervals(){
     std::stringstream ss;
     ss << Intervals;
     std::cout << ss.str().substr(0,100) << std::endl;
-    // for(auto it = Intervals.begin(); it != Intervals.end(); it++)
-    //     printf("[%u, %u), ", it->lower(), it->upper());
-    // printf("\n");
 }
 
 std::string IntervalList::Intervals2str(){
@@ -224,6 +235,5 @@ std::string IntervalList::Intervals2str(){
         sprintf(temp, "[%u, %u), ", it->first.lower(), it->first.upper());
         result += temp;
     }
-        // result += "[" + std::to_string(Intervals[i].start) + ", " + std::to_string(Intervals[i].end) + "], ";
     return result;
 }

@@ -1,13 +1,25 @@
 import csv, os, matplotlib.pyplot as plt, pandas as pd, sys, numpy as np
 from datetime import datetime
+import matplotlib
+from matplotlib import font_manager
+from matplotlib.lines import Line2D
 
+# ---------- Configuration & Styles ----------
+font_params = {'fontname': 'serif', 'fontsize': 11}
+font_path = font_manager.findfont(font_manager.FontProperties(family="serif"))
+font_prop = font_manager.FontProperties(fname=font_path, weight="bold", size=11)
+
+plt.rcParams["hatch.linewidth"] = 0.5
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"]  = 42
+plt.rcParams["lines.linewidth"]     = 2
 
 def load_csv(in_file):
     df = pd.read_csv(in_file, sep=',')
     # df.columns = ['optim_num','range_group_num','range_duplica_num','speed','last_speed','duration','efficiency','recved_bytes','total_bytes','error_cnt']
     df = df[ df.last_speed > 0 ]
     df.speed = df.speed * 8 / 1000.0
-    df.efficiency = df.efficiency * 100
+    df.efficiency = df.efficiency
     df = df[ df.duration >= 59 ]
     df = df[ df.total_bytes > 1 ]
     return df
@@ -116,14 +128,30 @@ def single_plot(axe, df, xcol, xlabel, ylabel, ylim, with_title):
     axes1 = df.plot(ax=axe, x=xcol, legend=False)
     for i, line in enumerate(axes1.get_lines()):
         line.set_marker(markers[i%(len(markers))])
-    if with_title:
-        axes1.set_ylabel(ylabel)
-        # axes1.set_title(ylabel)
-    axes1.set_xlabel(xlabel)
+        line.set_markersize(5)
 
+    axes1.set_title(with_title, y=-0.7, pad=10, **font_params)
+    axes1.set_ylabel(ylabel, **font_params)
+    axes1.set_xlabel(xlabel,**font_params)
+
+    # axes1.tick_params(axis='both', which='major', labelsize=8, direction='in', pad=2)
+    # for tick in axes1.xaxis.get_majorticklabels():
+    #     tick.set_fontsize(9)
+    #     tick.set_fontname('serif')
+    # Grid and Spines
+    axes1.grid(axis='y', linestyle=':', color='gray', alpha=0.5, zorder=0)
+    axes1.spines['top'].set_visible(False)
+    axes1.spines['right'].set_visible(False)
+    axes1.spines['left'].set_linewidth(0.8)
+    axes1.spines['bottom'].set_linewidth(0.8)
     if ylim:
         axes1.set_ylim(0, ylim)
 
+    # axes1.text(0.5, -0.45, xlabel,
+    #             horizontalalignment='center',
+    #             verticalalignment='top',
+    #             transform=axes1.transAxes,
+    #             **font_params)
 
 def boxplot(df, keyword, out_file, lim):
     ax = 0
@@ -148,22 +176,24 @@ def boxplot(df, keyword, out_file, lim):
     # plt.savefig(out_file) #transparent=True
 
 in_file = os.path.expanduser(sys.argv[1])
-title = sys.argv[2]
+# title = sys.argv[2]
 markers = ['H', '^', 'v', 's', '3', '.', '1', '_', 'x', ',', '*', '+']
-ylims = {'speed':10, 'efficiency':100, 'count':10, 'request_delay_avg':1, 'resp_delay_avg':3, 'detect_delay_avg':15, 'timeout_delay_sum':300}
+ylims = {'speed':11, 'efficiency':100, 'count':10, 'request_delay_avg':1, 'resp_delay_avg':3, 'detect_delay_avg':15, 'timeout_delay_sum':300}
 labels = {'speed': 'Goodput (Mbps)', 'efficiency': 'Efficiency (%)', 'count':'Count', 'request_delay_avg':'Request Delay(s)', 'resp_delay_avg':'Response Delay(s)', 'detect_delay_avg':"Detect Delay(s)", 'timeout_delay_sum':'Timeout Delay'}
 
 
 df = load_csv(in_file)
 df_mean = group_df(df)
 
-keywords = ['speed'] #, 'efficiency'
+keywords = ['speed', 'efficiency'] #, 
 # keywords = ['speed','request_delay_avg','resp_delay_avg'] #'request_delay_max', ,'resp_delay_max'  'efficiency'
 # keywords = ['speed','detect_delay_avg','request_delay_avg',] #'request_delay_max', ,'resp_delay_max'  'efficiency'
 #keywords = ['speed','timeout_delay_sum','resp_delay_avg']
 ncol = len(keywords)
-nrow = 1
-fig, axes = plt.subplots(nrows=1, ncols=ncol) #figsize=(6, 4)
+nrow = 3
+fig, axes = plt.subplots(figsize=(7.2, 3.6), nrows=ncol, ncols=nrow, sharex=True) #, constrained_layout=True
+plt.subplots_adjust(top=0.75, bottom=0.2, wspace=0.3)
+
 for i in range(ncol):
     keyword = keywords[i]
     if nrow == 1:
@@ -174,28 +204,52 @@ for i in range(ncol):
         else:
             single_plot(axes[i], df_reform, 'range_duplica_num', '', labels[keyword], ylims[keyword], True)
     else:
-        for j in range(1,nrow+1):
-            df_reform = reform_df_per_optim(df_mean, j, 'group', 'duplica', 7, [keyword]) #[ df_mean.optim_num == j]
+        captions = ['(a)1 Optimistic Connection', '(b)2 Optimistic Connections', '(c)3 Optimistic Connections']
+        all_captions = [['','',''], captions]
+        for j in range(nrow):
+            df_reform = reform_df_per_optim(df_mean, j+1, 'group', 'duplica', 5, [keyword]) #[ df_mean.optim_num == j]
             # print(type(df_reform))
-            if j == 1:
-                single_plot(axes[i][j-1], df_reform, 'range_group_num', '', labels[keyword], ylims[keyword], True)
-            else:
-                single_plot(axes[i][j-1], df_reform, 'range_group_num', '', labels[keyword], ylims[keyword], False)
+            xlabel, ylabel, title = '','',''
+            if j == 0:
+                ylabel = labels[keyword]
+            if i == 1:
+                title = captions[j]
+                xlabel = 'Number of Backup Groups'
+
+            single_plot(axes[i][j], df_reform, 'range_group_num', xlabel, ylabel, ylims[keyword], title)
         # df_reform = reform_df(df_mean, 'duplica', 'group', 7, [keyword])
         # single_plot(axes[i], df_reform, 'range_duplica_num', 'Number of Duplicate Range Request Connection(s)', labels[keyword], ylims[keyword])
 
-plt.legend(loc='center left', bbox_to_anchor=(1,0.5))
 
-fig.add_subplot(111, frameon=False)
-# hide tick and tick label of the big axes
-plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
-plt.grid(False)
-plt.xlabel('Number of Standard TCP Connection(s)')
+handles, labels = axes[0][0].get_legend_handles_labels()
+handles = [plt.plot([], marker="", ls="")[0]] + handles
+fig.legend(handles,
+           ['Number of Recovery Threads:', '1', '2', '3', '4'], 
+           loc='upper center', 
+           bbox_to_anchor=(0.5, 1.01), 
+           ncol=7, 
+        #    title=,
+        #    title_fontsize=8,
+           prop=font_prop,
+           fontsize=10,
+        #    handletextpad=0.4, columnspacing=1.0,
+           markerfirst=False,
+           frameon=False)
+
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+# fig.add_subplot(111, frameon=False)
+# # hide tick and tick label of the big axes
+# plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+# plt.grid(False)
+# plt.xlabel('Number of Backup Groups', **font_params)
+
+
 
 #handles, labels = axes[0][0].get_legend_handles_labels()
 #fig.legend(handles, ['1 TCP', '2 TCPs', '3 TCPs', '4 TCPs', '5 TCPs', '6 TCPs'], ncol=6, loc='upper center', bbox_to_anchor=(0.5, 0.95))
-fig.suptitle(title)
-fig_file = in_file.replace('.csv',"_group_%s.png" % datetime.now().strftime("%Y%m%dT%H%M%S"))
+# fig.suptitle(title)
+fig_file = in_file.replace('.csv',"_group_%s.pdf" % datetime.now().strftime("%Y%m%dT%H%M%S"))
 plt.savefig(fig_file, bbox_inches="tight") #transparent=True
 
 # plot(df_speed, df_effi, fig_file)

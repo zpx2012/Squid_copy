@@ -1,4 +1,4 @@
-import os, sys, re, traceback
+import os, sys, re, traceback, pandas as pd
 
 def str_to_kbyte(st):
     num = 0
@@ -11,6 +11,19 @@ def str_to_kbyte(st):
         num = float(st.replace('M',''))*1024
     return num
 
+def get_total_recvbytes(dirc, in_file, goodbytes):
+    tshark_file = in_file.replace('curl_squid', 'tcpdump').replace('.txt', '.pcap.tshark')
+    with open(os.path.join(dirc, tshark_file), 'r') as inf:
+        lines = inf.read().splitlines()
+        fields = lines[0].split(',')
+        if len(fields) == 8:
+            cols = ['time','ipid','src_ip','srcport','data_len','tcp_seq_rel','ack_sel','ooo']
+        elif len(fields) == 10:
+            cols = ['time','ipid','src_ip','srcport','dstport','data_len','tcp_seq_rel','ack_sel','rwnd','ooo']
+        df_tshark = pd.read_csv(os.path.join(dirc, tshark_file), lineterminator='\n',sep=',', header = None, names = cols)
+        df_tshark = df_tshark[df_tshark.srcport == 80]
+        return df_tshark[df_tshark.tcp_seq_rel <= goodbytes]['data_len'].sum()
+
 def parse_range_file(dir_name, file_name):
     try:
         numbers_str = file_name.split('_')[5]
@@ -18,24 +31,41 @@ def parse_range_file(dir_name, file_name):
         with open(os.path.join(dir_name, file_name), 'r') as inf:
             lines = list(filter(None, inf.read().splitlines()))
             if len(lines) > 2:
-                avg_speed, last_speed, duration, recv_bytes, total_bytes,error_cnt = 0,0,0,0,1,0
-                if 'Total is' in lines[-1]:
-                    total_bytes = int(lines[-1].split(': ')[1])/1024.0
+                avg_speed, last_speed, duration, recv_bytes, total_bytes,error_cnt = 0,0,0,87548090,1,0
+                # if 'Total is' in lines[-1]:
+                #     total_bytes = int(lines[-1].split(': ')[1])
                 for line in lines[::-1]:
-                    if 'curl: (18)' in line:
-                        error_cnt += 1
-                    if '83.4M' in line:
+                    if 'curl: (18)' in line or 'curl: (52)' in line or 'curl: (28) Operation too slow' in line:
+                        if 'curl: (18)' in line and '83.4M' in lines[::-2]:
+                            fields = list(filter(None,line.replace('d ','d').split(' ')))
+                            if int(fields[0]) >= 98:
+                                lr = re.findall(r'\d+', line)
+                                recv_bytes -= int(lr[1])
+                                continue
+                        recv_bytes = 0
+                        print("\033[31m%s\n\033[0m" % line)
+                        break
+                    
+                    elif 'curl: (28)' in line:
+                        lr = re.findall(r'\d+', line)
+                        recv_bytes = int(lr[2])
+                        
+                    elif '83.4M' in line:
                         fields = list(filter(None,line.replace('d ','d').split(' ')))
                         if len(fields) < 7:
                             continue
-                        recv_bytes = str_to_kbyte(fields[3])
+                        # recv_bytes = str_to_kbyte(fields[3])*1024
                         avg_speed = str_to_kbyte(fields[6])
                         duration = sum(x * int(t) for x, t in zip([3600, 60, 1], fields[9].split(":"))) 
                         last_speed = str_to_kbyte(fields[11])
+                        total_bytes = get_total_recvbytes(dir_name, file_name, recv_bytes)
                         break
-                output += avg_speed, last_speed, duration, recv_bytes/total_bytes, recv_bytes, total_bytes, error_cnt
-                print(output)
-                return output
+                if recv_bytes:
+                    output += avg_speed, last_speed, duration, recv_bytes*100.0/total_bytes, recv_bytes, total_bytes, error_cnt
+                    print(output)
+                    return output
+                else:
+                    return None
     except:
         print(file_name)
         print('%s' % traceback.format_exc())

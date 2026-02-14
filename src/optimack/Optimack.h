@@ -421,7 +421,7 @@ public:
     int range_recv_block(int sockfd, Interval* it);
     int process_range_rv(int id, int port, http_header* header, char* response, int rv, int& recv_offset);
     // int send_group_range_request(struct range_conn* cur_range_conn, const int group_start_i, char* ranges_str);
-    int send_group_one_range_request(struct range_conn* group_conns, uint start_seq, uint end_seq);
+    int send_group_range_request(struct range_conn* group_conns, interval_map gaps);
     int send_group_range_request_worker(struct range_conn** range_conns, int group_i);
     int cb_range(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data);
     
@@ -437,8 +437,8 @@ public:
 
     //receive buffer
     struct data_segment{
-        unsigned char* data;
         int len;
+        unsigned char* data;
         data_segment() 
         { data = NULL; len = 0; }
         data_segment(unsigned char* data_, int len_)
