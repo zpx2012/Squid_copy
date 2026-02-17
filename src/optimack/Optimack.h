@@ -3,6 +3,7 @@
 
 
 #include "thr_pool.h"
+#include "recv_buffer.h"
 #include <set>
 #include <map>
 #include <vector>
@@ -181,7 +182,7 @@ struct range_conn{
     int id, sockfd, sockfd_old, range_request_count, requested_bytes, erase_count, port;
     unsigned int ini_seq_rem;  //remote sequence number
     unsigned int ini_seq_loc;  //local sequence number
-    unsigned int next_seq_rem;  //rel
+    unsigned int next_seq_rem;
     unsigned int next_seq_loc;  //TODO: rel
     unsigned int last_next_seq_rem;
     IntervalList *group_recved_seq;
@@ -276,6 +277,8 @@ public:
     int process_tcp_packet_with_payload(struct mytcphdr* tcphdr, unsigned int seq_rel, unsigned char* payload, int payload_len, struct subconn_info* subconn, char* log);
     int process_tcp_ciphertext_packet(int pkt_id, struct mytcphdr* tcphdr, unsigned int seq, unsigned int ack, unsigned char *tcp_opt, unsigned int tcp_opt_len, unsigned char* payload, int payload_len, bool incoming, subconn_info* subconn, char* log);
     int process_tcp_plaintext_packet(thread_data* thr_data, struct mytcphdr* tcphdr, unsigned int seq, unsigned int ack, unsigned char *tcp_opt, unsigned int tcp_opt_len, unsigned char* payload, int payload_len, bool incoming, subconn_info* subconn, char* log);
+    int process_tcp_plaintext_outgoing_packet(thread_data* thr_data, struct mytcphdr* tcphdr, unsigned int seq, unsigned int ack, unsigned char* payload, int payload_len, subconn_info* subconn, char* log);
+    int process_tcp_plaintext_incoming_packet(thread_data* thr_data, struct mytcphdr* tcphdr, unsigned int seq, unsigned int ack, unsigned char* payload, int payload_len, subconn_info* subconn, char* log);
     void send_optimistic_ack_with_SACK(struct subconn_info* conn, int cur_ack, int adjusted_rwnd, IntervalList* recved_seq);
     int modify_to_main_conn_packet(struct subconn_info* subconn, struct mytcphdr* tcphdr, unsigned char* packet, unsigned int packet_len, unsigned int seq_rel);
     void send_optimistic_ack(struct subconn_info* conn, int cur_ack, int adjusted_rwnd);
@@ -436,18 +439,7 @@ public:
     uint range_request_template_len;
 
 private:
-    // receive buffer internals
-    struct data_segment{
-        int len;
-        unsigned char* data;
-        data_segment() 
-        { data = NULL; len = 0; }
-        data_segment(unsigned char* data_, int len_)
-        { data = data_; len = len_; }
-    };
-    std::map<uint, struct data_segment> recv_buffer;
-    void free_recv_buffer_segment(struct data_segment& segment);
-    void clear_recv_buffer();
+    RecvBuffer recv_buffer_mgr;
     int insert_to_recv_buffer(uint seq, unsigned char* data, int len);
     int insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int len);
     int remove_recved_recv_buffer(uint seq);
@@ -461,11 +453,6 @@ private:
     int send_last_inorder_recv_buffer_withLock(uint end);
     int resend_cnt = 0;
 
-
-    std::mutex recv_buffer_mutex;
-    std::condition_variable recv_buffer_cv;
-    uint recv_buffer_last_sent_seq = 1;
-    bool recv_buffer_sender_stop = false;
     int send_data_to_squid_thread();
     // void (*fp_to_client_write)(const char*, ssize_t) const = NULL;
 

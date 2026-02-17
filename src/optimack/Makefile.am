@@ -26,6 +26,8 @@ liboptim_la_SOURCES = \
 	socket.h \
 	thr_pool.cc \
 	thr_pool.h \
+	recv_buffer.h \
+	recv_buffer.cc \
 	util.cc \
 	util.h \
 	logging.cc \
@@ -46,6 +48,8 @@ liboptim_la_SOURCES = \
 	get_server_key.h \
 	tls.h \
 	tls.cc \
+	range_gap_dispatcher.h \
+	range_gap_dispatcher.cc \
 	range_request.cc \
 	reassembler.h \
 	reassembler.cc \

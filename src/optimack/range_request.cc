@@ -10,6 +10,7 @@
 #include <libnfnetlink/libnfnetlink.h>
 #include "logging.h"
 #include "Optimack.h"
+#include "range_gap_dispatcher.h"
 #include "socket.h"
 #include <condition_variable>
 #include <mutex>
@@ -921,20 +922,14 @@ void Optimack::range_watch_multi() //void* arg
     // int group_cnt = 0;
     // int quotas[GROUP_NUM] = {0};
     // std::ostringstream ostr[GROUP_NUM], pstr[GROUP_NUM];
-    int group_i = 0;
+    RangeGapDispatcher gap_dispatcher(GROUP_NUM, debug_range);
     interval_map dummy_range;
     dummy_range += std::make_pair(interval_type::right_open(1001, 1002), 0.01);
     while(!range_stop) {
         
         // dispatcher
         interval_map gaps = recved_seq.getGapsAndUpdateTimer(get_min_next_seq_rem(), 2*GROUP_NUM, 100);
-        // if(gaps.size()) print_func("gaps size: %d", gaps.iterative_size());
-        for(auto it = gaps.begin(); it != gaps.end(); it++){
-            // if(group_queue[group_i]->size() < 4)
-            if(debug_range) print_func("[Range]: range_watch_multi: insert [%u, %u] to group %d", it->first.lower(), it->first.upper(), group_i);
-            group_queue[group_i]->insertNewInterval(it->first.lower(), it->first.upper());
-            group_i = (group_i + 1) % GROUP_NUM;
-        }
+        gap_dispatcher.distribute(gaps, group_queue);
 
 
         for(int i = 0; i < GROUP_NUM*2;i++){
