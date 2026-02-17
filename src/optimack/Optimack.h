@@ -435,7 +435,8 @@ public:
     char range_request_template[1000];
     uint range_request_template_len;
 
-    //receive buffer
+private:
+    // receive buffer internals
     struct data_segment{
         int len;
         unsigned char* data;
@@ -445,7 +446,8 @@ public:
         { data = data_; len = len_; }
     };
     std::map<uint, struct data_segment> recv_buffer;
-    pthread_mutex_t mutex_recv_buffer = PTHREAD_MUTEX_INITIALIZER;
+    void free_recv_buffer_segment(struct data_segment& segment);
+    void clear_recv_buffer();
     int insert_to_recv_buffer(uint seq, unsigned char* data, int len);
     int insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int len);
     int remove_recved_recv_buffer(uint seq);
@@ -460,13 +462,14 @@ public:
     int resend_cnt = 0;
 
 
-    std::mutex stdmutex_rb;
-    std::condition_variable cv_rb;
-    uint last_send = 1;
-    bool send_squid_stop = false;
+    std::mutex recv_buffer_mutex;
+    std::condition_variable recv_buffer_cv;
+    uint recv_buffer_last_sent_seq = 1;
+    bool recv_buffer_sender_stop = false;
     int send_data_to_squid_thread();
     // void (*fp_to_client_write)(const char*, ssize_t) const = NULL;
 
+public:
     //TLS
     bool is_ssl = false;
 #ifdef USE_OPENSSL

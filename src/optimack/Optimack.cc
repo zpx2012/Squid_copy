@@ -43,7 +43,7 @@ const int print_per_sec_on = true;
 // #define COLLETIVE_MODE 1
 
 #ifndef CONN_NUM
-#define CONN_NUM 1
+#define CONN_NUM 3
 #endif
 
 #ifndef ACKPACING
@@ -1183,6 +1183,8 @@ Optimack::Optimack()
     subconn_infos.clear();
     bytes_per_second.clear();
     recv_buffer.clear();
+    recv_buffer_last_sent_seq = 1;
+    recv_buffer_sender_stop = false;
     recved_seq.insertNewInterval(1,UINT_MAX);
     range_stop = -1;
     seq_next_global = 1;
@@ -1274,6 +1276,12 @@ Optimack::cleanup()
         subconn_infos[backup_port]->optim_ack_stop++;
         // log_info("ask selective_optimack_thread to exit");
     }
+
+    {
+        std::lock_guard<std::mutex> lk(recv_buffer_mutex);
+        recv_buffer_sender_stop = true;
+    }
+    recv_buffer_cv.notify_all();
 
     // if(ask_nfq_stop){
     //     pthread_join(nfq_thread, NULL);
@@ -1377,6 +1385,7 @@ Optimack::cleanup()
     // pthread_mutex_unlock(&mutex_subconn_infos);
 
     // print_func("S%d: cleanup finished\n", squid_port);
+    clear_recv_buffer();
 }
 
 Optimack::~Optimack()
@@ -2498,6 +2507,11 @@ void Optimack::start_altogether_optimack(){
         
         if(optim_ack_stop == -1){
             optim_ack_stop = 0;
+            {
+                std::lock_guard<std::mutex> lk(recv_buffer_mutex);
+                recv_buffer_sender_stop = false;
+                recv_buffer_last_sent_seq = cur_ack_rel ? cur_ack_rel : 1;
+            }
             std::thread send_squid_worker = std::thread(&Optimack::send_data_to_squid_thread, getptr());
             send_squid_worker.detach();
             if(use_optimack){
@@ -2801,7 +2815,7 @@ int Optimack::process_tcp_plaintext_packet(
                     }
 
                     if (subconn_i == 0) {
-                        cv_rb.notify_one();
+                        recv_buffer_cv.notify_one();
                         this->rwnd = ntohs(tcphdr->th_win) * win_scale;
                         // this->rwnd = rwnd > 6291456? 6291456 : rwnd;
                         if(rwnd > max_win_size)
@@ -3232,7 +3246,7 @@ bool Optimack::store_and_send_data(uint seq_rel, unsigned char* payload, int pay
             if(it->second != OUT_OF_ORDER){
                 if (!is_backup && subconn)
                     subconn->last_inorder_data_time = std::chrono::system_clock::now();
-                cv_rb.notify_one();
+                recv_buffer_cv.notify_one();
                 // send_out_of_order_recv_buffer_withLock(first_end);
             }
         }
@@ -3315,6 +3329,24 @@ Optimack::exec_iptables(char action, char* rule)
     return status;
 }
 
+void Optimack::free_recv_buffer_segment(struct data_segment& segment)
+{
+    if (segment.data) {
+        free(segment.data);
+        segment.data = NULL;
+    }
+    segment.len = 0;
+}
+
+void Optimack::clear_recv_buffer()
+{
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
+    for (auto& entry : recv_buffer) {
+        free_recv_buffer_segment(entry.second);
+    }
+    recv_buffer.clear();
+}
+
 //This one in use
 int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int len)
 {
@@ -3325,8 +3357,7 @@ int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int 
     }
     memset(payload_recv_buffer, 0, len+1);
     memcpy(payload_recv_buffer, data, len);
-    std::lock_guard<std::mutex> lk(stdmutex_rb);
-    // pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     auto ret = recv_buffer.insert( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
     if (ret.second == false) {
         if(debug_rb) print_func("recv_buffer: %u already existed. [%u, %u]\n", seq, ret.first->first, ret.first->first+ret.first->second.len);
@@ -3334,8 +3365,7 @@ int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int 
         if(ret.first->second.len < len){
             // print_func("recv_buffer: old len %d < new len %d. Erase old one, replace with new onw\n", ret.first->second.len, len);
             // log_error("recv_buffer: old len %d < new len %d. Erase old one, replace with new onw\n", ret.first->second.len, len);
-            free(ret.first->second.data);
-            ret.first->second.data = NULL;
+            free_recv_buffer_segment(ret.first->second);
             recv_buffer.erase(ret.first);
             recv_buffer.insert ( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
             if(debug_rb) print_func("recv_buffer: reinsert [%u, %u] len %d", seq, ret.first->first, ret.first->first+ret.first->second.len);
@@ -3349,7 +3379,6 @@ int Optimack::insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int 
     }
     else if(debug_rb)
         print_func("recv_buffer: insert [%u, %u] len %d, data %p", ret.first->first, ret.first->first+ret.first->second.len, ret.first->second.len, ret.first->second.data);
-    // pthread_mutex_unlock(&mutex_recv_buffer);
     return ret.second;
 }
 
@@ -3362,7 +3391,7 @@ int Optimack::insert_to_recv_buffer(uint seq, unsigned char* data, int len)
     }
     memset(payload_recv_buffer, 0, len);
     memcpy(payload_recv_buffer, data, len);
-    // pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     auto ret = recv_buffer.insert( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
     if (ret.second == false) {
         // print_func("recv_buffer: %u already existed.\n", seq);
@@ -3370,8 +3399,7 @@ int Optimack::insert_to_recv_buffer(uint seq, unsigned char* data, int len)
         if(ret.first->second.len < len){
             // print_func("recv_buffer: old len %d < new len %d. Erase old one, replace with new onw\n", ret.first->second.len, len);
             // log_error("recv_buffer: old len %d < new len %d. Erase old one, replace with new onw\n", ret.first->second.len, len);
-            free(ret.first->second.data);
-            ret.first->second.data = NULL;
+            free_recv_buffer_segment(ret.first->second);
             recv_buffer.erase(ret.first);
             recv_buffer.insert ( std::pair<uint , struct data_segment>(seq, data_segment(payload_recv_buffer, len)) );
         }
@@ -3382,28 +3410,24 @@ int Optimack::insert_to_recv_buffer(uint seq, unsigned char* data, int len)
     }
     else if(debug_rb)
         print_func("recv_buffer: insert [%u, %u] len %d", seq, seq+len-1, len); 
-    // pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
 int Optimack::send_out_of_order_recv_buffer_withLock(uint seq){
-    pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     send_out_of_order_recv_buffer(seq);
-    pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
 int Optimack::send_out_of_order_recv_buffer_withLock(uint start, uint end, int max_count){
-    pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     send_out_of_order_recv_buffer(start, end, max_count);
-    pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
 int Optimack::send_out_of_order_recv_buffer_withLock(uint start, uint end){
-    pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     send_out_of_order_recv_buffer(start, end);
-    pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
@@ -3416,7 +3440,7 @@ int Optimack::send_out_of_order_recv_buffer(uint start, uint end, int max_count)
         if(it->first <= start && start < it->first+it->second.len-1){
             // send_data_to_squid(it->first, it->second.data, it->second.len);
             // log_info("[ofo]: found first one, send %u, len %d, seq %u", it->first, it->second.len, seq);
-            for(auto cur = it; cur != recv_buffer.end() && count < max_count; count++){
+            for(auto cur = it; cur != recv_buffer.end() && count < max_count; ++cur, ++count){
                 if(cur->first < end){
                     send_data_to_squid(cur->first, cur->second.data, cur->second.len);
                     log_info("[ofo]: send %u, len %d, start %u, end %u", cur->first, cur->second.len, start, end);
@@ -3466,11 +3490,18 @@ int Optimack::send_out_of_order_recv_buffer(uint start, uint end)
 int Optimack::send_last_inorder_recv_buffer_withLock(uint end)
 {
     bool found = false;
-    pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     for(auto prev = recv_buffer.begin(); prev != recv_buffer.end();){
         auto cur = next(prev);
         uint prev_upper = prev->first+prev->second.len;
-        // print_func("send_last_inorder_recv_buffer: prev[%d, %d], cur[%d, %d]", prev->first, prev_upper, cur->first, cur->first+cur->second.len);
+        if (cur == recv_buffer.end()) {
+            if (prev_upper <= end) {
+                send_data_to_squid(prev->first, prev->second.data, prev->second.len);
+                free_recv_buffer_segment(prev->second);
+                recv_buffer.erase(prev);
+            }
+            break;
+        }
         if(prev_upper <= end){//&& cur->first+cur->second.len <= win_end, when to send the unsend ones?
             if(prev_upper >= cur->first){
                 send_data_to_squid(prev->first, prev->second.data, prev->second.len);
@@ -3478,7 +3509,7 @@ int Optimack::send_last_inorder_recv_buffer_withLock(uint end)
             }else{
                 if(found){
                     send_data_to_squid(cur->first, cur->second.data, cur->second.len);
-                    free(cur->second.data);
+                    free_recv_buffer_segment(cur->second);
                     recv_buffer.erase(cur);
                 }
                 break;
@@ -3487,31 +3518,33 @@ int Optimack::send_last_inorder_recv_buffer_withLock(uint end)
         else{
                 break;
         }
-        free(prev->second.data);
+        free_recv_buffer_segment(prev->second);
         recv_buffer.erase(prev);
         prev = cur;
     }
-    // log_info("[ofo]: leave send_out_of_order_recv_buffer, seq %u", seq);
-    pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
 
 int Optimack::send_data_to_squid_thread(){
-    // uint last_send = 1;
     const int MAX_BUF_LEN = 1460*10+1;
     unsigned char buf[MAX_BUF_LEN] = {0};
     int buf_len = 0;
-    while(!send_squid_stop){
-        std::unique_lock<std::mutex> lk(stdmutex_rb);
-        cv_rb.wait(lk);
+    while (true) {
+        std::unique_lock<std::mutex> lk(recv_buffer_mutex);
+        recv_buffer_cv.wait(lk, [this] {
+            return recv_buffer_sender_stop || !recv_buffer.empty();
+        });
+        if (recv_buffer_sender_stop) {
+            break;
+        }
 
         memset(buf, 0, MAX_BUF_LEN);
         buf_len = 0;
         if(debug_rb) print_func("send_data_to_squid_thread: wake up\n"); //if(debug_rb) 
         for(auto prev = recv_buffer.begin(); prev != recv_buffer.end();){
-            if(debug_rb) print_func("send_data_to_squid_thread:[%u, %u], seq %u", prev->first, prev->first+prev->second.len, last_send); //
-            if (prev->first <= last_send && prev->first+prev->second.len > last_send){
+            if(debug_rb) print_func("send_data_to_squid_thread:[%u, %u], seq %u", prev->first, prev->first+prev->second.len, recv_buffer_last_sent_seq); //
+            if (prev->first <= recv_buffer_last_sent_seq && prev->first+prev->second.len > recv_buffer_last_sent_seq){
                 memcpy(buf+buf_len, prev->second.data, prev->second.len);
                 buf_len += prev->second.len;
 
@@ -3526,17 +3559,14 @@ int Optimack::send_data_to_squid_thread(){
                             send_data_to_squid(prev->first-buf_len+prev->second.len, buf, buf_len);
                             memset(buf, 0, MAX_BUF_LEN);
                             buf_len =0;
-                            last_send = prev->first + prev->second.len;
-                            cur_ack_rel = last_send;
+                            recv_buffer_last_sent_seq = prev->first + prev->second.len;
+                            cur_ack_rel = recv_buffer_last_sent_seq;
                         }
 
                         if(debug_rb) print_func("memcpy(%p+%d, %p, %d)", buf, buf_len, cur->second.data, cur->second.len); //if(debug_rb) 
                         memcpy(buf+buf_len, cur->second.data, cur->second.len);
                         buf_len += cur->second.len;
-                        memset(prev->second.data, 0, prev->second.len);
-                        free(prev->second.data);
-                        prev->second.data = NULL;
-                        prev->second.len = 0;
+                        free_recv_buffer_segment(prev->second);
                         recv_buffer.erase(prev);
                     }
                     else{
@@ -3548,21 +3578,18 @@ int Optimack::send_data_to_squid_thread(){
                     send_data_to_squid(prev->first-buf_len+prev->second.len, buf, buf_len);
                     memset(buf, 0, MAX_BUF_LEN);
                     buf_len = 0;
-                    last_send = prev->first+prev->second.len;
-                    cur_ack_rel = last_send;
+                    recv_buffer_last_sent_seq = prev->first+prev->second.len;
+                    cur_ack_rel = recv_buffer_last_sent_seq;
                 }
                 break;
             }
-            else if(prev->first > last_send)
+            else if(prev->first > recv_buffer_last_sent_seq)
                 break;
-            memset(prev->second.data, 0, prev->second.len);
-            free(prev->second.data);
-            prev->second.data = NULL;
-            prev->second.len = 0;
-            // prev->second = NULL;
+            free_recv_buffer_segment(prev->second);
             recv_buffer.erase(prev++);
         }
     }
+    return 0;
 }
 
 
@@ -3571,6 +3598,9 @@ int Optimack::send_out_of_order_recv_buffer(uint seq)
     // struct subconn_info* squid_conn = subconn_infos[squid_port];
     // if(recv_buffer.size() < 2)
     //     return -1;
+    if (recv_buffer.size() < 2) {
+        return 0;
+    }
     bool found = false;
     int count = 0;
     for(auto prev = recv_buffer.begin(), cur = next(prev); prev != recv_buffer.end() && cur != recv_buffer.end(); prev = cur, cur++, count++){ //prev = cur,
@@ -3582,13 +3612,13 @@ int Optimack::send_out_of_order_recv_buffer(uint seq)
             // }
             found = true;
             send_data_to_squid(prev->first, prev->second.data, prev->second.len);
-            free(prev->second.data);
+            free_recv_buffer_segment(prev->second);
             recv_buffer.erase(prev);
             continue;
         }
         else if(found){
             send_data_to_squid(prev->first, prev->second.data, prev->second.len);
-            free(prev->second.data);
+            free_recv_buffer_segment(prev->second);
             recv_buffer.erase(prev);
             found = false;
             break;
@@ -3602,9 +3632,8 @@ int Optimack::send_out_of_order_recv_buffer(uint seq)
 }
 
 int Optimack::remove_recved_recv_buffer_withLock(uint seq){
-    pthread_mutex_lock(&mutex_recv_buffer);
+    std::lock_guard<std::mutex> lk(recv_buffer_mutex);
     remove_recved_recv_buffer(seq);
-    pthread_mutex_unlock(&mutex_recv_buffer);
     return 0;
 }
 
@@ -3617,8 +3646,7 @@ int Optimack::remove_recved_recv_buffer(uint seq)
         if(it->first+it->second.len-1 < seq){
             log_info("recv_buffer: remove [%u, %u], cur seq %u\n", it->first, it->first+it->second.len-1, seq);
             // log_error("recv_buffer: remove [%u, %u], cur seq %u\n", it->first, it->first+it->second.len-1, seq);
-            free(it->second.data);
-            it->second.data = NULL;
+            free_recv_buffer_segment(it->second);
             recv_buffer.erase(it++);
             continue;
         }
@@ -4560,4 +4588,3 @@ void Optimack::dummy_recv_tls(){
 // }
 
 /** end **/
-
