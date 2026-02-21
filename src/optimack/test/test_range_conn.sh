@@ -25,6 +25,9 @@ ranges=(1 2 3 4 5 6 7 8 9 10)
 
 i=0
 
+export OPTIMACK_RANGE_RECV_MODE=global
+export OPTIMACK_RANGE_RECV_SHARDS=4
+export OPTIMACK_RANGE_SAMPLE_METRICS=0
 
 sed -i "s/define BACKUP_MODE .*/define BACKUP_MODE 0/g" ~/squid_copy/src/optimack/Optimack.cc
 sed -i "s/define RANGE_MODE .*/define RANGE_MODE 1/g" ~/squid_copy/src/optimack/Optimack.cc
@@ -37,7 +40,7 @@ for ((cnt=0; cnt<3; cnt++)); do
     echo $cnt
     for i in 1 2 3;do # 1 3
         for j in 1 2 4 6 8 12; do #1 2 7 8
-            for k in 1 2 3 4; do #3 4 5 6
+            for k in 1 ; do #3 4 5 6 2 3 4
         #         iptables -F;
                 iptables -F -t mangle
                 sed -i "s/define CONN_NUM .*/define CONN_NUM ${i}/g" ~/squid_copy/src/optimack/Optimack.cc

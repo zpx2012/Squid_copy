@@ -312,6 +312,10 @@ public:
     pthread_mutex_t mutex_subconn_infos = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_t mutex_optim_ack_stop = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_t mutex_cur_ack_rel = PTHREAD_MUTEX_INITIALIZER;
+    std::mutex range_min_next_seq_cv_mtx_;
+    std::condition_variable range_min_next_seq_cv_;
+    std::atomic<uint64_t> range_min_next_seq_event_{0};
+    std::atomic<uint> range_last_min_next_seq_rem_notified_{UINT_MAX};
     
     IntervalList recved_seq, all_lost_seq, we2squid_lost_seq, sack_list;
     pthread_mutex_t mutex_seq_gaps = PTHREAD_MUTEX_INITIALIZER;

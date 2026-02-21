@@ -2878,9 +2878,13 @@ bool Optimack::store_and_send_data(uint seq_rel, unsigned char* payload, int pay
 
 
 void Optimack::update_subconn_next_seq_rem(struct subconn_info* subconn, uint num, bool is_fin){
+    bool updated = false;
+    uint old_next_seq_rem = 0;
     pthread_mutex_lock(&subconn->mutex_opa);
+    old_next_seq_rem = subconn->next_seq_rem;
     if (subconn->next_seq_rem < num) {//overlap: seq_next_global:100, seq_rel:95, payload_len = 10
         subconn->next_seq_rem = num;
+        updated = true;
         subconn->last_data_received = std::chrono::system_clock::now();
         log_info("S%d: update next_seq_rem to %u", subconn->id, subconn->next_seq_rem);
         if(!is_fin)
@@ -2888,6 +2892,21 @@ void Optimack::update_subconn_next_seq_rem(struct subconn_info* subconn, uint nu
         // log_seq(processed_seq_file, local_port, seq_rel);
     }
     pthread_mutex_unlock(&subconn->mutex_opa);
+
+    if (updated) {
+        // Fast path: if this subconn was already above the last notified minimum,
+        // it cannot raise the global minimum.
+        const uint last_notified = range_last_min_next_seq_rem_notified_.load(std::memory_order_relaxed);
+        if (old_next_seq_rem > last_notified) {
+            return;
+        }
+        const uint min_next_seq_rem = get_min_next_seq_rem();
+        const uint prev = range_last_min_next_seq_rem_notified_.exchange(min_next_seq_rem, std::memory_order_relaxed);
+        if (prev != min_next_seq_rem) {
+            range_min_next_seq_event_.fetch_add(1, std::memory_order_relaxed);
+            range_min_next_seq_cv_.notify_one();
+        }
+    }
 }
 
 bool Optimack::try_update_uint(uint &src, uint target){

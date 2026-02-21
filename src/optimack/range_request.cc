@@ -212,6 +212,7 @@ void RangeRequestModule::stop()
         return;
     }
     owner_.range_stop = 1;
+    owner_.range_min_next_seq_cv_.notify_all();
     if (dispatch_thread_.joinable()) {
         dispatch_thread_.join();
     }
@@ -1113,13 +1114,12 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
             continue;
         }
 
-        if(group_conns[0].smph->try_acquire_for(std::chrono::seconds(3))){
+        if(group_conns[0].smph->try_acquire_for(std::chrono::seconds(2))){
 
             interval_map gaps = group_recved_seq->getGapsAndUpdateTimer(owner_.get_min_next_seq_rem(), RANGE_PER_RQ, 4);
 
             if(gaps.size()){
                 sendGroupRangeRequest(group_conns, gaps);
-
 
                 if(group_conns[0].range_request_count >= 80 && !switched){
                     switched = true;
@@ -1529,22 +1529,89 @@ void RangeRequestModule::runDispatchLoop()
     RangeGapDispatcher gap_dispatcher(GROUP_NUM, debug_range);
     interval_map dummy_range;
     dummy_range += std::make_pair(interval_type::right_open(1001, 1002), 0.01);
-    while(!owner_.range_stop) {
-        
-        // dispatcher
-        interval_map gaps = owner_.recved_seq.getGapsAndUpdateTimer(owner_.get_min_next_seq_rem(), 2*GROUP_NUM, 100);
-        gap_dispatcher.distribute(gaps, group_queue);
-
-        for(int i = 0; i < GROUP_NUM*2;i++){
+    const auto keepalive_tick_interval = std::chrono::milliseconds(50);
+    std::atomic<bool> keepalive_stop(false);
+    std::mutex keepalive_mtx;
+    std::condition_variable keepalive_cv;
+    std::thread keepalive_thread([&]() {
+        while(!owner_.range_stop && !keepalive_stop.load(std::memory_order_relaxed)) {
+            for(int i = 0; i < GROUP_NUM*2; i++){
                 double time_passed = elapsed(range_conns[i][RANGE_NUM-1].last_send);
-                if(range_conns[i][RANGE_NUM-1].port && range_conns[i][0].port && (time_passed >= 4.5) && (time_passed < 10) && (range_conns[i][0].range_request_count <= 90)){ //send dummy requests
+                if(range_conns[i][RANGE_NUM-1].port &&
+                   range_conns[i][0].port &&
+                   (time_passed >= 4.5) &&
+                   (time_passed < 10) &&
+                   (range_conns[i][0].range_request_count <= 90)){ // send dummy requests
                     range_conns[i][RANGE_NUM-1].last_send = std::chrono::system_clock::now();
                     std::thread send_thread(&RangeRequestModule::sendGroupRangeRequest, this, range_conns[i], dummy_range);
                     send_thread.detach();
                 }
             }
-        usleep(100);
+            std::unique_lock<std::mutex> lk(keepalive_mtx);
+            keepalive_cv.wait_for(
+                lk,
+                keepalive_tick_interval,
+                [&]() {
+                    return owner_.range_stop || keepalive_stop.load(std::memory_order_relaxed);
+                }
+            );
+        }
+    });
+
+    auto stop_keepalive_thread = [&]() {
+        keepalive_stop.store(true, std::memory_order_relaxed);
+        keepalive_cv.notify_all();
+        if (keepalive_thread.joinable()) {
+            keepalive_thread.join();
+        }
+    };
+
+    uint min_next_seq_rem = owner_.get_min_next_seq_rem();
+    owner_.range_last_min_next_seq_rem_notified_.store(min_next_seq_rem, std::memory_order_relaxed);
+    uint64_t seen_min_next_event = owner_.range_min_next_seq_event_.load(std::memory_order_relaxed);
+    const auto dispatch_fallback_interval = std::chrono::milliseconds(200);
+    auto next_fallback_deadline = std::chrono::steady_clock::now() + dispatch_fallback_interval;
+    while(!owner_.range_stop) {
+        {
+            std::unique_lock<std::mutex> lk(owner_.range_min_next_seq_cv_mtx_);
+            owner_.range_min_next_seq_cv_.wait_until(
+                lk,
+                next_fallback_deadline,
+                [&]() {
+                    return owner_.range_stop ||
+                           owner_.range_min_next_seq_event_.load(std::memory_order_relaxed) != seen_min_next_event;
+                }
+            );
+        }
+        if (owner_.range_stop) {
+            break;
+        }
+
+        bool should_dispatch = false;
+        const uint64_t cur_event = owner_.range_min_next_seq_event_.load(std::memory_order_relaxed);
+        if (cur_event != seen_min_next_event) {
+            seen_min_next_event = cur_event;
+            min_next_seq_rem = owner_.range_last_min_next_seq_rem_notified_.load(std::memory_order_relaxed);
+            should_dispatch = true;
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next_fallback_deadline) {
+                // Low-frequency fallback in case update_subconn_next_seq_rem did not fire for this path.
+                min_next_seq_rem = owner_.get_min_next_seq_rem();
+                should_dispatch = true;
+            }
+        }
+
+        if (!should_dispatch) {
+            continue;
+        }
+
+        interval_map gaps = owner_.recved_seq.getGapsAndUpdateTimer(min_next_seq_rem, 2*GROUP_NUM, 100);
+        gap_dispatcher.distribute(gaps, group_queue);
+        next_fallback_deadline = std::chrono::steady_clock::now() + dispatch_fallback_interval;
     }
+
+    stop_keepalive_thread();
 
     // delete[] range_conns;
     if (use_global_recv) {
