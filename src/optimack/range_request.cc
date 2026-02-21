@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdarg>
+#include <cstdlib>
 #include <errno.h>
 #include <arpa/inet.h> //ntohl
 #include <unistd.h> //close
@@ -59,7 +60,8 @@ const int RANGE_PER_RQ = 1;
 const bool debug_range = false;
 const int RANGE_SOCKET_BUF_BYTES = 1 << 20;
 const int RANGE_EPOLL_TIMEOUT_MS = 100;
-const int RANGE_RECV_HUB_SHARDS = 4;
+const int RANGE_RECV_HUB_MAX_SHARDS = 8;
+const int RANGE_RECV_HUB_DEFAULT_SHARDS = 4;
 
 struct RangeSocketMetrics {
     int sndbuf = -1;
@@ -384,6 +386,24 @@ struct GlobalRangeRecvHub {
     std::unordered_map<range_conn*, std::shared_ptr<RangeRecvConnState>> conn_states;
 };
 
+static int getActiveRangeRecvHubShards() {
+    static int shard_count = []() {
+        int configured = RANGE_RECV_HUB_DEFAULT_SHARDS;
+        const char* env_val = getenv("OPTIMACK_RANGE_RECV_SHARDS");
+        if (env_val && *env_val) {
+            char* end_ptr = NULL;
+            long parsed = strtol(env_val, &end_ptr, 10);
+            if (end_ptr != env_val && *end_ptr == '\0' && parsed > 0) {
+                configured = static_cast<int>(parsed);
+            }
+        }
+        configured = std::max(1, std::min(RANGE_RECV_HUB_MAX_SHARDS, configured));
+        print_func("[Range]: recv hub shards=%d (env OPTIMACK_RANGE_RECV_SHARDS)", configured);
+        return configured;
+    }();
+    return shard_count;
+}
+
 static int getRangeRecvHubShardByConn(const range_conn* conn) {
     if (!conn) {
         return 0;
@@ -392,14 +412,15 @@ static int getRangeRecvHubShardByConn(const range_conn* conn) {
     if (group_idx < 0) {
         group_idx = 0;
     }
-    return group_idx % RANGE_RECV_HUB_SHARDS;
+    return group_idx % getActiveRangeRecvHubShards();
 }
 
 static GlobalRangeRecvHub& getRangeRecvHub(int shard_id) {
-    static std::array<GlobalRangeRecvHub, RANGE_RECV_HUB_SHARDS> hubs;
-    int idx = shard_id % RANGE_RECV_HUB_SHARDS;
+    static std::array<GlobalRangeRecvHub, RANGE_RECV_HUB_MAX_SHARDS> hubs;
+    int shard_count = getActiveRangeRecvHubShards();
+    int idx = shard_id % shard_count;
     if (idx < 0) {
-        idx += RANGE_RECV_HUB_SHARDS;
+        idx += shard_count;
     }
     return hubs[idx];
 }
@@ -564,7 +585,8 @@ static bool startGlobalRangeRecvHub(RangeRequestModule* module, Optimack* owner)
         return false;
     }
 
-    for (int shard = 0; shard < RANGE_RECV_HUB_SHARDS; shard++) {
+    const int shard_count = getActiveRangeRecvHubShards();
+    for (int shard = 0; shard < shard_count; shard++) {
         GlobalRangeRecvHub& hub = getRangeRecvHub(shard);
         {
             std::lock_guard<std::mutex> lock(hub.mutex);
@@ -593,7 +615,8 @@ static bool startGlobalRangeRecvHub(RangeRequestModule* module, Optimack* owner)
 }
 
 static void stopGlobalRangeRecvHub(RangeRequestModule* module) {
-    for (int shard = 0; shard < RANGE_RECV_HUB_SHARDS; shard++) {
+    const int shard_count = getActiveRangeRecvHubShards();
+    for (int shard = 0; shard < shard_count; shard++) {
         GlobalRangeRecvHub& hub = getRangeRecvHub(shard);
         int epoll_fd = -1;
         {
