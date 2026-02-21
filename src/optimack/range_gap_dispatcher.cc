@@ -16,10 +16,9 @@ void RangeGapDispatcher::distribute(const interval_map& gaps, IntervalList** gro
             print_func("[Range]: range_watch_multi: insert [%u, %u] to group %d",
                        it->first.lower(),
                        it->first.upper(),
-                       next_group_);
+                       next_group_ + 1);
         }
         group_queue[next_group_]->insertNewInterval(it->first.lower(), it->first.upper());
         next_group_ = (next_group_ + 1) % group_count_;
-        print_func("%d", next_group_);
     }
 }

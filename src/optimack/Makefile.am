@@ -50,6 +50,7 @@ liboptim_la_SOURCES = \
 	tls.cc \
 	range_gap_dispatcher.h \
 	range_gap_dispatcher.cc \
+	range_request_module.h \
 	range_request.cc \
 	reassembler.h \
 	reassembler.cc \

@@ -4,6 +4,8 @@
 
 #include "thr_pool.h"
 #include "recv_buffer.h"
+#include <cstdint>
+#include <memory>
 #include <set>
 #include <map>
 #include <vector>
@@ -18,7 +20,6 @@
 #include <condition_variable>
 #include <semaphore>
 
-//#define GPROF_CHECK 0
 #ifndef GPROF_CHECK
     #include "autoconf.h"
 #else
@@ -39,10 +40,6 @@ class TLS_Encrypted_Record_Reassembler;
 class TLS_Decrypted_Records_Map;
 class TLS_Record_Number_Seq_Map;
 #endif
-// #include "comm/Connection.h"
-// #include "../comm/forward.h"
-// #include <bits/stdc++.h>
-// using namespace std;
 
 #define USE_OPTIMACK 1
 
@@ -85,6 +82,7 @@ class NFQ{
 
 
 class Optimack;
+class RangeRequestModule;
 
 struct subconn_info
 {
@@ -118,8 +116,6 @@ struct subconn_info
 
     std::map<uint, uint> dup_seqs;
     IntervalList* recved_seq;
-    // std::vector<Interval> seq_gaps;
-    // pthread_mutex_t mutex_seq_gaps;
 
     bool is_backup;
     bool fin_or_rst_recved;
@@ -131,11 +127,8 @@ struct subconn_info
     SSL *ssl;
     TLS_Crypto_Coder* crypto_coder;
     TLS_Encrypted_Record_Reassembler* tls_rcvbuf;
-    // TLS_Record_Number_Seq_Map* tls_record_seq_map;
     int record_size;
     unsigned int next_seq_rem_tls; //for tls's optimack overrun recover, otherwise recover won't work
-    // uint ini_seq_tls_data;
-    // unsigned char *iv_salt, *session_key;
 #endif
     void lock(){
         pthread_mutex_lock(&mutex_opa);
@@ -149,7 +142,6 @@ struct subconn_info
 extern std::map<uint, struct subconn_info*> allconns;
 
 
-// Multithread
 struct thread_data {
     struct nfq_q_handle *qh;
     unsigned int  pkt_id;
@@ -196,7 +188,6 @@ struct range_conn{
     pthread_mutex_t mutex_opa;
     std::mutex std_mutex;
     std::counting_semaphore<10> *smph;
-    // std::unique_lock<std::mutex> lock((std_mutex));//std::defer_lock
     std::chrono::time_point<std::chrono::system_clock> last_send;
 #ifdef USE_OPENSSL
     SSL *ssl, *ssl_old;
@@ -205,8 +196,6 @@ struct range_conn{
     range_conn(): id(0), sockfd(0), sockfd_old(0), range_request_count(0), requested_bytes(0), erase_count(0), port(0), in_use(0) {}
 };
 
-// Thread wrapper
-// void* nfq_loop(void *arg);
 int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data);
 void* pool_handler(void* arg);
 void* optimistic_ack(void* arg);
@@ -215,16 +204,9 @@ void* send_all_requests(void* arg);
 void* open_duplicate_conns_handler(void* arg);
 void* open_duplicate_ssl_conns_handler(void* arg);
 
-// void* range_watch(std::shared_ptr<Optimack> obj);
-// void* range_recv(void* arg);
-
-
 class Optimack : public std::enable_shared_from_this<Optimack>
 {
 public:
-    // [[nodiscard]] static std::shared_ptr<Optimack> create() {
-    //     return std::shared_ptr<Optimack>(new Optimack());
-    // }
     using TFunc = std::function<void (const char*, ssize_t)>;
     TFunc fp_to_client_write;
 
@@ -261,9 +243,6 @@ public:
     void print_ss(FILE* out_file);
     bool does_packet_lost_on_all_conns();
 
-    // int find_seq_gaps(unsigned int seq);
-    // void insert_seq_gaps(unsigned int start, unsigned int end, unsigned int step);
-    // void delete_seq_gaps(unsigned int val);
     void start_altogether_optimack();
     void* full_optimistic_ack_altogether();
 
@@ -293,7 +272,6 @@ public:
     void send_data_to_server_and_update_seq(struct subconn_info* conn, unsigned char* payload, int payload_len);
     bool store_and_send_data(uint seq_rel, unsigned char* payload, int payload_len, struct subconn_info* subconn, bool is_backup, int id);
     
-    // void update_subconn_next_seq_loc(struct subconn_info* subconn, uint num, bool is_fin);
     void backup_try_fill_gap();
     void send_request(char* request, int len);
     void send_all_requests();
@@ -307,7 +285,6 @@ public:
     void remove_iptables_rules();
 
 
-    // variables
     int main_fd, client_fd;
     char g_local_ip[16]; //TODO: different connection from client
     char g_remote_ip[16];
@@ -320,42 +297,11 @@ public:
     struct sockaddr_in dstAddr;
     uint squid_MSS;
     
-    // std::shared_ptr<std::map<uint, struct subconn_info*>> subconn_infos_shared = std::make_shared<std::map<uint, struct subconn_info*>>();
-    // std::map<uint, struct subconn_info*>* p = new std::map<uint, struct subconn_info*>();
-    // std::shared_ptr<std::map<uint, struct subconn_info*>> subconn_infos_shared = std::shared_ptr<std::map<uint, struct subconn_info*>>(new std::map<uint, struct subconn_info*>(),
-    //     [](std::map<uint, struct subconn_info*>* p_subconn_infos){
-    //         uint port = p_subconn_infos->begin()->second->local_port;
-    //         printf("S%d: deleting subconn_infos\n", port);
-    //         for (auto it = p_subconn_infos->begin(); it != p_subconn_infos->end(); it++){
-    //             if(it->second->is_ssl){
-    // #ifdef USE_OPENSSL
-    //                     if(it->second->crypto_coder)
-    //                         free(it->second->crypto_coder);  
-    //                     // if(it != subconn_infos.begin())
-    //                     //     if(it->second->ssl){
-    //                     //         SSL_shutdown(it->second->ssl);
-    //                     //         SSL_free(it->second->ssl);
-    //                     //         sleep(1);
-    //                     //     }
-    // #endif
-    //                 }
-    //                 if(it != p_subconn_infos->begin())
-    //                     close(it->second->sockfd);
-    //                 if(it->second->recved_seq)
-    //                     free(it->second->recved_seq);
-    //                 free(it->second);
-    //                 it->second = NULL;            
-    //         }
-    //         printf("S%d: deleted subconn_infos\n", port);
-    //     }
-    // );
     std::map<uint, struct subconn_info*> subconn_infos;
     uint subconn_count;
-    // std::vector<struct subconn_info> subconn_infos, backup_subconn_infos;
 
     std::vector<char*> iptables_rules;
     
-    // locals
     bool request_recved = false;
     int nfq_queue_num;
     
@@ -367,13 +313,10 @@ public:
     pthread_mutex_t mutex_optim_ack_stop = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_t mutex_cur_ack_rel = PTHREAD_MUTEX_INITIALIZER;
     
-    // seq
     IntervalList recved_seq, all_lost_seq, we2squid_lost_seq, sack_list;
     pthread_mutex_t mutex_seq_gaps = PTHREAD_MUTEX_INITIALIZER;
-    // std::vector<Interval> seq_gaps, recved_seq;
     std::map<std::string, uint> bytes_per_second;
 
-    // std::std::vector<unsigned int*> seq_gaps;
     unsigned int seq_next_global = 1,
                  cur_ack_rel = 1,
                  last_ack_rel = 0,
@@ -397,12 +340,12 @@ public:
     FILE *log_file, *rwnd_file, *adjust_rwnd_file, *forward_seq_file, *recv_seq_file, *processed_seq_file, *ack_file, *seq_gaps_file, *seq_gaps_count_file, *lost_per_second_file, *tcpdump_pipe, *info_file;
     char output_dir[100] = {0};
     char home_dir[10] = {0};
-    char hostname[20], start_time[20], tcpdump_file_name[100], mtr_file_name[100], loss_file_name[100], seq_gaps_count_file_name[100], info_file_name[100];
+    char hostname[20], start_time[20], tcpdump_file_name[100], mtr_file_name[100], loss_file_name[100], seq_gaps_count_file_name[100], info_file_name[200];
 
-    // range
+private:
+    friend class RangeRequestModule;
 
     void range_watch();
-    void range_watch_multi();
     int range_recv(struct range_conn* range_conn_this);
     int check_range_conn(struct range_conn* range_conn_this, std::vector<Interval>& range_job_vector);
     void try_for_gaps_and_request();
@@ -411,26 +354,19 @@ public:
     uint get_tcp_seq(uint byte_seq);
     int insert_lost_range(uint start, uint end);
     int get_http_response_header_len(subconn_info* subconn, unsigned char* payload, int payload_len);
-    //IntervalList* get_lost_range(uint start, uint end);
     int send_http_range_request(struct range_conn* cur_range_conn);
     int send_http_range_request(struct range_conn* cur_range_conn, const char* ranges);
     int send_http_range_request(struct range_conn* cur_range_conn, Interval* range);
-    int send_http_range_request(void* sockfd, Interval* range);
+    int send_http_range_request(intptr_t sockfd_handle, Interval* range);
     void start_range_recv(IntervalList* list);
-    void we2squid_loss_and_start_range_recv(uint start, uint end, IntervalList* intvl_lis);
-    void we2squid_loss_and_insert(uint start, uint end);
     uint get_min_next_seq_rem();
     int range_worker(int& sockfd, Interval* it);
     int range_recv_block(int sockfd, Interval* it);
     int process_range_rv(struct range_conn* group_conns, http_header* header, char* response, int rv, int& recv_offset);
-    // int send_group_range_request(struct range_conn* cur_range_conn, const int group_start_i, char* ranges_str);
-    int send_group_range_request(struct range_conn* group_conns, interval_map gaps);
-    int send_group_range_request_worker(struct range_conn** range_conns, int group_i);
+public:
     int cb_range(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data);
-    
 
-
-    std::thread range_thread;
+private:
     pthread_mutex_t mutex_range = PTHREAD_MUTEX_INITIALIZER;
     int range_stop, range_sockfd, range_request_count = 0;
     IntervalList ranges_sent;
@@ -438,7 +374,7 @@ public:
     char range_request_template[1000];
     uint range_request_template_len;
 
-private:
+    std::unique_ptr<RangeRequestModule> range_request_module_;
     RecvBuffer recv_buffer_mgr;
     int insert_to_recv_buffer(uint seq, unsigned char* data, int len);
     int insert_to_recv_buffer_withLock(uint seq, unsigned char* data, int len);
@@ -454,15 +390,12 @@ private:
     int resend_cnt = 0;
 
     int send_data_to_squid_thread();
-    // void (*fp_to_client_write)(const char*, ssize_t) const = NULL;
 
 public:
-    //TLS
     bool is_ssl = false;
 #ifdef USE_OPENSSL
     TLS_Decrypted_Records_Map* decrypted_records_map;
     TLS_Record_Number_Seq_Map* tls_record_seq_map;
-    // std::shared_ptr<TLS_Record_Number_Seq_Map> tls_record_seq_map = std::make_shared<TLS_Record_Number_Seq_Map>();
 
     int open_duplicate_ssl_conns();
     int set_main_subconn_ssl(SSL *squid_ssl);
@@ -482,17 +415,6 @@ int get_localport(int fd);
 double get_current_epoch_time_second();
 double get_current_epoch_time_nanosecond();
 double elapsed(std::chrono::time_point<std::chrono::system_clock> start);
-
-// auto funcTime = 
-//     [](auto&& func, auto&&... params) {
-//         // get time before function invocation
-//         const auto& start = std::chrono::high_resolution_clock::now();
-//         // function invocation using perfect forwarding
-//         std::forward<decltype(func)>(func)(std::forward<decltype(params)>(params)...);
-//         // get time after function invocation
-//         const auto& stop = std::chrono::high_resolution_clock::now();
-//         return stop - start;
-//      };
 
 std::vector<std::string> split(const std::string &s, char delim);
 bool is_static_object(std::string request);

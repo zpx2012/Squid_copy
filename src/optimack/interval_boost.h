@@ -9,7 +9,6 @@
 #include <mutex>
 #include <boost/icl/interval.hpp>
 #include <boost/icl/interval_map.hpp>
-// #include "interval.h"
 
 typedef enum
 {
@@ -52,15 +51,12 @@ public:
     unsigned int getFirstStart();
     unsigned int getFirstEnd();
     unsigned int getLastEnd();
-    // unsigned int getElem(unsigned int index, bool is_start);
-    interval_map& getIntervalList() { return Intervals; } //?
+    interval_map& getIntervalList() { return Intervals; }
     
     void insertNewInterval(unsigned int start, unsigned int end);
-    // bool checkAndinsertNewInterval(unsigned int start, unsigned int end, int &order_flag);
 
     interval_map removeInterval(unsigned int start, unsigned int end);
     interval_map getGapsAndUpdateTimer(uint min_seq, int num, int timeout);
-    // void removeInterval_updateTimer(unsigned int start, unsigned int end);
 
     void substract(IntervalList* other);
     bool contains(unsigned int start, unsigned int end);
@@ -73,24 +69,5 @@ private:
     std::shared_mutex smtx;
 
 };
-
-// struct Interval
-// {
-//     unsigned int start;
-//     unsigned int end;
-//     std::string timestamp;
-//     Interval()
-//         : start(0), end(0)
-//     {
-//     }
-//     Interval(unsigned int s, unsigned int e, char* ts)
-//         : start(s), end(e), timestamp(ts)
-//     {
-//     }
-//     Interval(unsigned int s, unsigned int e, std::string ts)
-//         : start(s), end(e), timestamp(ts)
-//     {
-//     }
-// };
 
 #endif

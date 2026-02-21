@@ -9,7 +9,6 @@ void get_local_ip(char *ip);
 void traceroute(char *remote_ip, char *output_file);
 void get_legal_ttl(char *remote_ip);
 void locate_gfw(char *remote_ip);
-// void* optimistic_ack(void* data);
 
 char* ip2str(u_int32_t ip, char *str);
 u_int32_t str2ip(const char *str);
@@ -23,4 +22,3 @@ void human_dump(const unsigned char *packet, size_t size);
 timespec diff(timespec end, timespec start);
 
 #endif
-

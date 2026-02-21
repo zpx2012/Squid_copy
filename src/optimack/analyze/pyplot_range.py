@@ -249,7 +249,7 @@ plt.tight_layout(rect=[0, 0, 1, 0.95])
 #handles, labels = axes[0][0].get_legend_handles_labels()
 #fig.legend(handles, ['1 TCP', '2 TCPs', '3 TCPs', '4 TCPs', '5 TCPs', '6 TCPs'], ncol=6, loc='upper center', bbox_to_anchor=(0.5, 0.95))
 # fig.suptitle(title)
-fig_file = in_file.replace('.csv',"_group_%s.pdf" % datetime.now().strftime("%Y%m%dT%H%M%S"))
+fig_file = in_file.replace('.csv',"_group_%s.png" % datetime.now().strftime("%Y%m%dT%H%M%S"))
 plt.savefig(fig_file, bbox_inches="tight") #transparent=True
 
 # plot(df_speed, df_effi, fig_file)

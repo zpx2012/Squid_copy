@@ -7,12 +7,6 @@
 extern char pkt_data[10000];
 extern size_t pkt_len;
 
-// extern char local_ip[16];
-// extern char remote_ip[16];
-
-// extern unsigned short local_port;
-// extern unsigned short remote_port;
-
 extern char payload_sk[1000];
 extern char payload_nosk[1000];
 extern char payload_sk_split21[1000];
@@ -38,13 +32,4 @@ extern void* nfq_loop(void *arg);
 
 extern int opt_measure;
 
-// #define SUBCONN_NUM 3
-// struct subconn_info
-// {
-//     unsigned short local_port;
-//     unsigned int ini_seq_rem;//remote sequence number
-// };
-// extern struct subconn_info subconn_info[SUBCONN_NUM];
-
 #endif
-
