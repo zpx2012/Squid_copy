@@ -60,8 +60,10 @@ const int RANGE_PER_RQ = 1;
 const bool debug_range = false;
 const int RANGE_SOCKET_BUF_BYTES = 1 << 20;
 const int RANGE_EPOLL_TIMEOUT_MS = 100;
-const int RANGE_RECV_HUB_MAX_SHARDS = 8;
+const int RANGE_RECV_HUB_MAX_SHARDS = 16;
 const int RANGE_RECV_HUB_DEFAULT_SHARDS = 4;
+
+static bool isRangeSampleMetricsEnabled();
 
 struct RangeSocketMetrics {
     int sndbuf = -1;
@@ -99,7 +101,8 @@ static void tune_range_socket_buffers(const range_conn* conn) {
     if (!conn || conn->sockfd <= 0) {
         return;
     }
-    const RangeSocketMetrics before = sample_range_socket_metrics(conn->sockfd);
+    const bool sample_metrics = isRangeSampleMetricsEnabled();
+    const RangeSocketMetrics before = sample_metrics ? sample_range_socket_metrics(conn->sockfd) : RangeSocketMetrics{};
     int target_buf = RANGE_SOCKET_BUF_BYTES;
     if (setsockopt(conn->sockfd, SOL_SOCKET, SO_SNDBUF, &target_buf, sizeof(target_buf)) < 0) {
         print_func("[Range]R%d-%d: setsockopt(SO_SNDBUF) failed: %s", conn->id, conn->port, strerror(errno));
@@ -107,18 +110,20 @@ static void tune_range_socket_buffers(const range_conn* conn) {
     if (setsockopt(conn->sockfd, SOL_SOCKET, SO_RCVBUF, &target_buf, sizeof(target_buf)) < 0) {
         print_func("[Range]R%d-%d: setsockopt(SO_RCVBUF) failed: %s", conn->id, conn->port, strerror(errno));
     }
-    const RangeSocketMetrics after = sample_range_socket_metrics(conn->sockfd);
-    print_func(
-        "[Range]R%d-%d: sockbuf snd %d->%d rcv %d->%d rtt_us %u->%u",
-        conn->id,
-        conn->port,
-        before.sndbuf,
-        after.sndbuf,
-        before.rcvbuf,
-        after.rcvbuf,
-        before.has_rtt ? before.rtt_us : 0u,
-        after.has_rtt ? after.rtt_us : 0u
-    );
+    if (sample_metrics) {
+        const RangeSocketMetrics after = sample_range_socket_metrics(conn->sockfd);
+        print_func(
+            "[Range]R%d-%d: sockbuf snd %d->%d rcv %d->%d rtt_us %u->%u",
+            conn->id,
+            conn->port,
+            before.sndbuf,
+            after.sndbuf,
+            before.rcvbuf,
+            after.rcvbuf,
+            before.has_rtt ? before.rtt_us : 0u,
+            after.has_rtt ? after.rtt_us : 0u
+        );
+    }
 }
 
 
@@ -384,7 +389,56 @@ struct GlobalRangeRecvHub {
     Optimack* owner = NULL;
     std::unordered_map<int, std::shared_ptr<RangeRecvConnState>> fd_states;
     std::unordered_map<range_conn*, std::shared_ptr<RangeRecvConnState>> conn_states;
+    std::vector<std::shared_ptr<RangeRecvConnState>> retired_states;
 };
+
+
+/*** 
+
+# Original per-connection recv threads
+export OPTIMACK_RANGE_RECV_MODE=per_conn
+
+# New global epoll recv (sharded)
+export OPTIMACK_RANGE_RECV_MODE=global
+# optional shard tuning in global mode
+export OPTIMACK_RANGE_RECV_SHARDS=4   # try 2/4/8/12/16
+
+***/
+
+enum class RangeRecvMode {
+    GlobalHub,
+    PerConnectionThreads
+};
+
+static RangeRecvMode getRangeRecvMode() {
+    static RangeRecvMode mode = []() {
+        const char* env_val = getenv("OPTIMACK_RANGE_RECV_MODE");
+        if (env_val && *env_val) {
+            if (strcmp(env_val, "per_conn") == 0 || strcmp(env_val, "per-conn") == 0) {
+                print_func("[Range]: recv mode=per_conn (env OPTIMACK_RANGE_RECV_MODE)");
+                return RangeRecvMode::PerConnectionThreads;
+            }
+        }
+        print_func("[Range]: recv mode=global (env OPTIMACK_RANGE_RECV_MODE)");
+        return RangeRecvMode::GlobalHub;
+    }();
+    return mode;
+}
+
+static bool useGlobalRangeRecvHubMode() {
+    return getRangeRecvMode() == RangeRecvMode::GlobalHub;
+}
+
+static bool isRangeSampleMetricsEnabled() {
+    static bool enabled = []() {
+        const char* env_val = getenv("OPTIMACK_RANGE_SAMPLE_METRICS");
+        if (!env_val || !*env_val) {
+            return true;
+        }
+        return !(strcmp(env_val, "0") == 0 || strcmp(env_val, "false") == 0 || strcmp(env_val, "off") == 0);
+    }();
+    return enabled;
+}
 
 static int getActiveRangeRecvHubShards() {
     static int shard_count = []() {
@@ -425,6 +479,19 @@ static GlobalRangeRecvHub& getRangeRecvHub(int shard_id) {
     return hubs[idx];
 }
 
+static void pruneRetiredRangeRecvStates(GlobalRangeRecvHub& hub) {
+    hub.retired_states.erase(
+        std::remove_if(
+            hub.retired_states.begin(),
+            hub.retired_states.end(),
+            [](const std::shared_ptr<RangeRecvConnState>& state) {
+                return !state || state->in_flight.load() == 0;
+            }
+        ),
+        hub.retired_states.end()
+    );
+}
+
 static void runGlobalRangeRecvLoop(GlobalRangeRecvHub* hub) {
     if (!hub) {
         return;
@@ -463,15 +530,7 @@ static void runGlobalRangeRecvLoop(GlobalRangeRecvHub* hub) {
         }
 
         for (int i = 0; i < event_count; i++) {
-            const int fd = events[i].data.fd;
-            std::shared_ptr<RangeRecvConnState> state;
-            {
-                std::lock_guard<std::mutex> lock(hub->mutex);
-                auto it = hub->fd_states.find(fd);
-                if (it != hub->fd_states.end()) {
-                    state = it->second;
-                }
-            }
+            RangeRecvConnState* state = static_cast<RangeRecvConnState*>(events[i].data.ptr);
             if (!state || state->closing.load()) {
                 continue;
             }
@@ -482,6 +541,7 @@ static void runGlobalRangeRecvLoop(GlobalRangeRecvHub* hub) {
                 continue;
             }
 
+            const int fd = state->fd;
             int rv = 0;
             int saved_errno = 0;
             bool did_recv = false;
@@ -555,15 +615,24 @@ static void runGlobalRangeRecvLoop(GlobalRangeRecvHub* hub) {
             }
 
             state->closing.store(true);
+            std::shared_ptr<RangeRecvConnState> keepalive;
             {
                 std::lock_guard<std::mutex> lock(hub->mutex);
                 auto fd_it = hub->fd_states.find(fd);
-                if (fd_it != hub->fd_states.end() && fd_it->second == state) {
+                if (fd_it != hub->fd_states.end() && fd_it->second.get() == state) {
+                    keepalive = fd_it->second;
                     hub->fd_states.erase(fd_it);
                 }
                 auto conn_it = hub->conn_states.find(state->conn);
-                if (conn_it != hub->conn_states.end() && conn_it->second == state) {
+                if (conn_it != hub->conn_states.end() && conn_it->second.get() == state) {
+                    if (!keepalive) {
+                        keepalive = conn_it->second;
+                    }
                     hub->conn_states.erase(conn_it);
+                }
+                if (keepalive) {
+                    hub->retired_states.push_back(keepalive);
+                    pruneRetiredRangeRecvStates(*hub);
                 }
             }
             epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
@@ -636,6 +705,7 @@ static void stopGlobalRangeRecvHub(RangeRequestModule* module) {
             std::lock_guard<std::mutex> lock(hub.mutex);
             hub.fd_states.clear();
             hub.conn_states.clear();
+            hub.retired_states.clear();
             hub.module = NULL;
             hub.owner = NULL;
             hub.running = false;
@@ -665,6 +735,7 @@ static bool registerRangeRecvConn(RangeRequestModule* module, range_conn* conn) 
         if (!hub.running || hub.module != module || hub.epoll_fd < 0) {
             return false;
         }
+        pruneRetiredRangeRecvStates(hub);
         auto existing = hub.conn_states.find(conn);
         if (existing != hub.conn_states.end()) {
             int old_fd = existing->second->fd;
@@ -672,6 +743,7 @@ static bool registerRangeRecvConn(RangeRequestModule* module, range_conn* conn) 
             if (old_fd > 0) {
                 epoll_ctl(hub.epoll_fd, EPOLL_CTL_DEL, old_fd, NULL);
             }
+            hub.retired_states.push_back(existing->second);
             hub.fd_states.erase(old_fd);
             hub.conn_states.erase(existing);
         }
@@ -682,7 +754,7 @@ static bool registerRangeRecvConn(RangeRequestModule* module, range_conn* conn) 
 
     epoll_event ev = {};
     ev.events = EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
-    ev.data.fd = state->fd;
+    ev.data.ptr = state.get();
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, state->fd, &ev) != 0) {
         print_func("[Range]R%d-%d: global epoll add failed for fd %d: %s", conn->id, conn->port, state->fd, strerror(errno));
         std::lock_guard<std::mutex> lock(hub.mutex);
@@ -713,6 +785,7 @@ static void unregisterRangeRecvConn(RangeRequestModule* module, range_conn* conn
         if (!hub.running || hub.module != module || hub.epoll_fd < 0) {
             return;
         }
+        pruneRetiredRangeRecvStates(hub);
         auto it = hub.conn_states.find(conn);
         if (it == hub.conn_states.end()) {
             return;
@@ -721,6 +794,7 @@ static void unregisterRangeRecvConn(RangeRequestModule* module, range_conn* conn
         state->closing.store(true);
         hub.fd_states.erase(state->fd);
         hub.conn_states.erase(it);
+        hub.retired_states.push_back(state);
         epoll_fd = hub.epoll_fd;
     }
 
@@ -762,8 +836,10 @@ int open_group_range_conn(struct range_conn** range_conns, int i, const char* re
         struct range_conn* cur_range_conn = &(group_conns[j]);
         prepare_group_range_conn(cur_range_conn, (i + 1) * 100 + j, smph, group_seq);
         open_range_conn(cur_range_conn, remote_ip, remote_port);
-        if (!registerRangeRecvConn(module, cur_range_conn)) {
-            print_func("[Range]R%d-%d: failed to register conn fd %d to global epoll", cur_range_conn->id, cur_range_conn->port, cur_range_conn->sockfd);
+        if (useGlobalRangeRecvHubMode()) {
+            if (!registerRangeRecvConn(module, cur_range_conn)) {
+                print_func("[Range]R%d-%d: failed to register conn fd %d to global epoll", cur_range_conn->id, cur_range_conn->port, cur_range_conn->sockfd);
+            }
         }
         if(obj->info_file){
             if(obj->processed_seq_file) {
@@ -1004,12 +1080,25 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
     uint64_t before_release_count[RANGE_NUM] = {0};
     uint64_t after_recv_bytes[RANGE_NUM] = {0};
     uint64_t after_release_count[RANGE_NUM] = {0};
+    const bool use_global_recv = useGlobalRangeRecvHubMode();
+    const bool sample_metrics = isRangeSampleMetricsEnabled();
+    std::thread recv_threads[RANGE_NUM];
 
-    print_func("[Group]G%d: backup_i %d", group_i, backup_i);
+    print_func("[Group]G%d: backup_i %d, recv_mode=%s", group_i, backup_i, use_global_recv ? "global" : "per_conn");
 
     for (int j = 0; j < RANGE_NUM; j++) {
-        before_metrics[j] = sample_range_socket_metrics(group_conns[j].sockfd);
-        snapshotRangeRecvConnStats(this, &group_conns[j], before_recv_bytes[j], before_release_count[j]);
+        if (sample_metrics) {
+            before_metrics[j] = sample_range_socket_metrics(group_conns[j].sockfd);
+        }
+        if (use_global_recv && sample_metrics) {
+            snapshotRangeRecvConnStats(this, &group_conns[j], before_recv_bytes[j], before_release_count[j]);
+        }
+    }
+
+    if (!use_global_recv) {
+        for (int j = 0; j < RANGE_NUM; j++) {
+            recv_threads[j] = std::thread(&RangeRequestModule::rangeRecv, this, &group_conns[j]);
+        }
     }
 
     for(int j=0; j < RANGE_NUM; j++){
@@ -1060,14 +1149,20 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
     }
     // sleep(4);
     for (int j = 0; j < RANGE_NUM; j++) {
-        snapshotRangeRecvConnStats(this, &group_conns[j], after_recv_bytes[j], after_release_count[j]);
-        after_metrics[j] = sample_range_socket_metrics(group_conns[j].sockfd);
+        if (use_global_recv && sample_metrics) {
+            snapshotRangeRecvConnStats(this, &group_conns[j], after_recv_bytes[j], after_release_count[j]);
+        } 
+        if (sample_metrics) {
+            after_metrics[j] = sample_range_socket_metrics(group_conns[j].sockfd);
+        }
     }
 
     print_func("[Group]G%d: close conns", group_i+1);
     for(int j=0; j < RANGE_NUM; j++){
         print_func("[Group]R%d: close sockfd %d", group_conns[j].id, group_conns[j].sockfd);
-        unregisterRangeRecvConn(this, &group_conns[j]);
+        if (use_global_recv) {
+            unregisterRangeRecvConn(this, &group_conns[j]);
+        }
         if(group_conns[j].sockfd > 0){
             // Wake any blocking recv()/SSL_read before close().
             shutdown(group_conns[j].sockfd, SHUT_RDWR);
@@ -1075,6 +1170,9 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
     }
 
     for(int j=0; j < RANGE_NUM; j++){
+        if (!use_global_recv && recv_threads[j].joinable()) {
+            recv_threads[j].join();
+        }
         if(group_conns[j].sockfd > 0){
             close(group_conns[j].sockfd);
         }
@@ -1085,12 +1183,14 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
 
     uint64_t worker_recv_bytes = 0;
     uint64_t worker_release_count = 0;
-    for (int j = 0; j < RANGE_NUM; j++) {
-        if (after_recv_bytes[j] > before_recv_bytes[j]) {
-            worker_recv_bytes += (after_recv_bytes[j] - before_recv_bytes[j]);
-        }
-        if (after_release_count[j] > before_release_count[j]) {
-            worker_release_count += (after_release_count[j] - before_release_count[j]);
+    if (sample_metrics) {
+        for (int j = 0; j < RANGE_NUM; j++) {
+            if (after_recv_bytes[j] > before_recv_bytes[j]) {
+                worker_recv_bytes += (after_recv_bytes[j] - before_recv_bytes[j]);
+            }
+            if (after_release_count[j] > before_release_count[j]) {
+                worker_release_count += (after_release_count[j] - before_release_count[j]);
+            }
         }
     }
 
@@ -1098,25 +1198,27 @@ int RangeRequestModule::sendGroupRangeRequestWorker(struct range_conn** range_co
     const double recv_mbps = elapsed_sec > 0.0
         ? (static_cast<double>(worker_recv_bytes) * 8.0) / (elapsed_sec * 1000.0 * 1000.0)
         : 0.0;
-    print_func(
-        "[Group]G%d perf: elapsed %.3fs, recv_bytes %llu, recv_mbps %.2f, semaphore_releases %llu",
-        group_i + 1,
-        elapsed_sec,
-        static_cast<unsigned long long>(worker_recv_bytes),
-        recv_mbps,
-        static_cast<unsigned long long>(worker_release_count)
-    );
-    for (int j = 0; j < RANGE_NUM; j++) {
+    if (sample_metrics) {
         print_func(
-            "[Group]R%d perf: sndbuf %d->%d, rcvbuf %d->%d, rtt_us %u->%u",
-            group_conns[j].id,
-            before_metrics[j].sndbuf,
-            after_metrics[j].sndbuf,
-            before_metrics[j].rcvbuf,
-            after_metrics[j].rcvbuf,
-            before_metrics[j].has_rtt ? before_metrics[j].rtt_us : 0u,
-            after_metrics[j].has_rtt ? after_metrics[j].rtt_us : 0u
+            "[Group]G%d perf: elapsed %.3fs, recv_bytes %llu, recv_mbps %.2f, semaphore_releases %llu",
+            group_i + 1,
+            elapsed_sec,
+            static_cast<unsigned long long>(worker_recv_bytes),
+            recv_mbps,
+            static_cast<unsigned long long>(worker_release_count)
         );
+        for (int j = 0; j < RANGE_NUM; j++) {
+            print_func(
+                "[Group]R%d perf: sndbuf %d->%d, rcvbuf %d->%d, rtt_us %u->%u",
+                group_conns[j].id,
+                before_metrics[j].sndbuf,
+                after_metrics[j].sndbuf,
+                before_metrics[j].rcvbuf,
+                after_metrics[j].rcvbuf,
+                before_metrics[j].has_rtt ? before_metrics[j].rtt_us : 0u,
+                after_metrics[j].has_rtt ? after_metrics[j].rtt_us : 0u
+            );
+        }
     }
 
     print_func("[Group]G%d: send_group_one_range_request, existing...\n", group_i+1);
@@ -1375,12 +1477,15 @@ void RangeRequestModule::runDispatchLoop()
         group_queue[i] = new IntervalList();
     }
 
-    if (!startGlobalRangeRecvHub(this, &owner_)) {
-        for(int i = 0; i < GROUP_NUM; i++) {
-            delete group_queue[i];
+    const bool use_global_recv = useGlobalRangeRecvHubMode();
+    if (use_global_recv) {
+        if (!startGlobalRangeRecvHub(this, &owner_)) {
+            for(int i = 0; i < GROUP_NUM; i++) {
+                delete group_queue[i];
+            }
+            print_func("[Range]: failed to start global recv hub");
+            return;
         }
-        print_func("[Range]: failed to start global recv hub");
-        return;
     }
 
     // create array of range_conns
@@ -1401,7 +1506,9 @@ void RangeRequestModule::runDispatchLoop()
     while(!owner_.request_len && !owner_.range_stop) usleep(10);
 
     if (owner_.range_stop) {
-        stopGlobalRangeRecvHub(this);
+        if (use_global_recv) {
+            stopGlobalRangeRecvHub(this);
+        }
         for(int i = 0; i < GROUP_NUM; i++) {
             delete group_queue[i];
         }
@@ -1440,7 +1547,9 @@ void RangeRequestModule::runDispatchLoop()
     }
 
     // delete[] range_conns;
-    stopGlobalRangeRecvHub(this);
+    if (use_global_recv) {
+        stopGlobalRangeRecvHub(this);
+    }
     for(int i = 0; i < GROUP_NUM; i++)
         delete group_queue[i];
     print_func("[Range]: range_watch_multi thread exits...\n");
