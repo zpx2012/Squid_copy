@@ -25,9 +25,9 @@ ranges=(1 2 3 4 5 6 7 8 9 10)
 
 i=0
 
-export OPTIMACK_RANGE_RECV_MODE=global
+export OPTIMACK_RANGE_RECV_MODE=per_conn
 export OPTIMACK_RANGE_RECV_SHARDS=4
-export OPTIMACK_RANGE_SAMPLE_METRICS=0
+export OPTIMACK_RANGE_SAMPLE_METRICS=off
 
 sed -i "s/define BACKUP_MODE .*/define BACKUP_MODE 0/g" ~/squid_copy/src/optimack/Optimack.cc
 sed -i "s/define RANGE_MODE .*/define RANGE_MODE 1/g" ~/squid_copy/src/optimack/Optimack.cc
@@ -36,12 +36,12 @@ sed -i "s/define RANGE_MODE .*/define RANGE_MODE 1/g" ~/squid_copy/src/optimack/
 j=1
 k=1
 
-for ((cnt=0; cnt<3; cnt++)); do
+for ((cnt=0; cnt<5; cnt++)); do
     echo $cnt
-    for i in 1 2 3;do # 1 3
-        for j in 1 2 4 6 8 12; do #1 2 7 8
-            for k in 1 ; do #3 4 5 6 2 3 4
-        #         iptables -F;
+    for i in 1 2;do # 1 3
+        for j in 1 2 3 4 5 6; do #1 2 7 8
+            for k in 6; do #3 4 5 6 2 3 4
+                iptables -F
                 iptables -F -t mangle
                 sed -i "s/define CONN_NUM .*/define CONN_NUM ${i}/g" ~/squid_copy/src/optimack/Optimack.cc
                 sed -i "s/const int GROUP_NUM = .*;/const int GROUP_NUM = ${j};/g" ~/squid_copy/src/optimack/range_request.cc

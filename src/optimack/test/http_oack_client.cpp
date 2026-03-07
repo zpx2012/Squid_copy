@@ -77,7 +77,7 @@ void run_command(const char *format, ...) {
     va_end(args);
     // std::cout << "[CMD] Executing: " << command << std::endl;
     if (system(command) != 0) {
-        std::cerr << "[CMD] Warning: Command failed." << std::endl;
+        std::cerr << "[CMD] Warning: Command failed - " << command << std::endl;
     }
 }
 

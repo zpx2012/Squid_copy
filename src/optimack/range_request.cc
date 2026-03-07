@@ -1526,7 +1526,6 @@ void RangeRequestModule::runDispatchLoop()
         owner_.range_request_template_len = 0;
     }
 
-    RangeGapDispatcher gap_dispatcher(GROUP_NUM, debug_range);
     interval_map dummy_range;
     dummy_range += std::make_pair(interval_type::right_open(1001, 1002), 0.01);
     const auto keepalive_tick_interval = std::chrono::milliseconds(50);
@@ -1566,6 +1565,7 @@ void RangeRequestModule::runDispatchLoop()
         }
     };
 
+    RangeGapDispatcher gap_dispatcher(GROUP_NUM, debug_range);
     uint min_next_seq_rem = owner_.get_min_next_seq_rem();
     owner_.range_last_min_next_seq_rem_notified_.store(min_next_seq_rem, std::memory_order_relaxed);
     uint64_t seen_min_next_event = owner_.range_min_next_seq_event_.load(std::memory_order_relaxed);
